@@ -58,7 +58,7 @@ class MentionPrinterClient(discord.Client):
         if message.guild is None:
             return
 
-        if message.author.bot:
+        if message.author.id == self.user.id:
             return
 
         if message.guild.id != self.context.config.discord_guild_id:
