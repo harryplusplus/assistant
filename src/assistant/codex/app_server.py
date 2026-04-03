@@ -19,7 +19,6 @@ from .schemas.codex_app_server_protocol_schemas import (
     JsonrpcMessage,
     JsonrpcRequest,
     JsonrpcResponse,
-    RequestId,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,9 +36,7 @@ class MessageError(Exception):
     message: str
     data: object | None = None
 
-    def __init__(
-        self, code: int, message: str, data: object | None = None
-    ) -> None:
+    def __init__(self, code: int, message: str, data: object | None = None) -> None:
         super().__init__(f"Message error: code={code}, message={message}")
         self.code = code
         self.message = message
@@ -50,23 +47,8 @@ _APP_SERVER_COMMAND: Final[tuple[str, ...]] = (
     "codex",
     "app-server",
 )
-_INITIALIZE_TIMEOUT_SECONDS: Final = 10.0
+_REQUEST_TIMEOUT_SECONDS: Final = 10.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
-
-
-def _check_client_request_id(request_id: RequestId) -> int:
-    if not isinstance(request_id, int):
-        msg = f"Client request ID must be int: got {request_id!r}"
-        raise TypeError(msg)
-
-    return request_id
-
-
-def _parse_client_response_id(request_id: RequestId) -> int | None:
-    if not isinstance(request_id, int):
-        return None
-
-    return request_id
 
 
 class AppServer:
@@ -74,7 +56,6 @@ class AppServer:
         self._process: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
-        self._transport_error: Exception | None = None
         self._next_request_id = 0
         self._pending: dict[int, asyncio.Future[object]] = {}
 
@@ -82,8 +63,6 @@ class AppServer:
         if self._process is not None:
             msg = "AppServer is already running."
             raise RuntimeError(msg)
-
-        self._transport_error = None
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -114,9 +93,7 @@ class AppServer:
                 await stdin.wait_closed()
 
         try:
-            await asyncio.wait_for(
-                process.wait(), timeout=_SHUTDOWN_TIMEOUT_SECONDS
-            )
+            await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("Did not exit after stdin close; sending SIGTERM")
             process.terminate()
@@ -136,15 +113,29 @@ class AppServer:
         await self._close_tasks()
         logger.info("Stopped")
 
-    async def _send_request(
+    async def send_request(
+        self,
+        request: ClientRequest,
+        result_type: type[ModelType],
+        *,
+        timeout: float | None = _REQUEST_TIMEOUT_SECONDS,
+    ) -> ModelType:
+        self._check_can_send_messages()
+        async with asyncio.timeout(timeout):
+            return await self._send_request_without_timeout(
+                request,
+                result_type,
+            )
+
+    async def _send_request_without_timeout(
         self, request: ClientRequest, result_type: type[ModelType]
     ) -> ModelType:
-        self._get_process()  # Ensure process is running.
+        request_id = request.id
+        if not isinstance(request_id, int):
+            msg = f"Client request ID must be int: got {request_id!r}"
+            raise TypeError(msg)
 
-        request_id = _check_client_request_id(request.id)
-        future: asyncio.Future[object] = (
-            asyncio.get_running_loop().create_future()
-        )
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
 
         try:
@@ -158,18 +149,25 @@ class AppServer:
 
         return result_type.model_validate(result)
 
+    async def send_notification(self, notification: ClientNotification) -> None:
+        self._check_can_send_messages()
+        await self._write(notification)
+
     def _get_process(self) -> asyncio.subprocess.Process:
         process = self._process
         if process is None:
             msg = "Not running."
             raise RuntimeError(msg)
 
-        transport_error = self._transport_error
-        if transport_error is not None:
-            msg = "Stdout transport is closed."
-            raise RuntimeError(msg) from transport_error
-
         return process
+
+    def _check_can_send_messages(self) -> None:
+        self._get_process()
+
+        stdout_task = self._stdout_task
+        if stdout_task is None or stdout_task.done():
+            msg = "Cannot send more messages."
+            raise RuntimeError(msg)
 
     def _get_stdin(self) -> asyncio.StreamWriter:
         process = self._get_process()
@@ -240,9 +238,7 @@ class AppServer:
         except Exception:
             logger.exception("Failed to read from stdout.")
         finally:
-            transport_error = RuntimeError("Stdout closed.")
-            self._transport_error = transport_error
-            self._fail_pending(transport_error)
+            self._fail_pending(RuntimeError("Stdout closed."))
 
     async def _stderr_loop(self) -> None:
         try:
@@ -292,8 +288,8 @@ class AppServer:
         self,
         message: JsonrpcResponse | JsonrpcError,
     ) -> asyncio.Future[object] | None:
-        request_id = _parse_client_response_id(message.id)
-        if request_id is None:
+        request_id = message.id
+        if not isinstance(request_id, int):
             logger.warning(
                 "Received response for non-client request ID: %r",
                 message.id,
@@ -302,9 +298,7 @@ class AppServer:
 
         future = self._pending.pop(request_id, None)
         if future is None:
-            logger.warning(
-                "Received response for unknown request ID: %s", message.id
-            )
+            logger.warning("Received response for unknown request ID: %s", message.id)
             return None
 
         if future.done():
@@ -355,25 +349,22 @@ class AppServer:
 
     async def _initialize(self) -> None:
         request_id = self._increase_request_id()
-        result = await asyncio.wait_for(
-            self._send_request(
-                InitializeRequest(
-                    id=request_id,
-                    method="initialize",
-                    params=InitializeParams(
-                        clientInfo=ClientInfo(
-                            name="assistant",
-                            title="Assistant",
-                            version=version("assistant"),
-                        )
-                    ),
+        result = await self.send_request(
+            InitializeRequest(
+                id=request_id,
+                method="initialize",
+                params=InitializeParams(
+                    clientInfo=ClientInfo(
+                        name="assistant",
+                        title="Assistant",
+                        version=version("assistant"),
+                    )
                 ),
-                InitializeResponse,
             ),
-            timeout=_INITIALIZE_TIMEOUT_SECONDS,
+            InitializeResponse,
         )
 
         logger.info("Initialized: user_agent=%s", result.userAgent)
 
     async def _initialized(self) -> None:
-        await self._write(InitializedNotification(method="initialized"))
+        await self.send_notification(InitializedNotification(method="initialized"))

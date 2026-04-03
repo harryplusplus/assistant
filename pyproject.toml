@@ -30,6 +30,7 @@ line-length = 80
 
 [tool.ruff.lint]
 ignore = [
+    "ASYNC109" # https://docs.astral.sh/ruff/rules/async-function-with-timeout/
     "COM812", # https://docs.astral.sh/ruff/rules/missing-trailing-comma/
     "COM819", # https://docs.astral.sh/ruff/rules/prohibited-trailing-comma/
     "D",      # https://docs.astral.sh/ruff/rules/#pydocstyle-d
