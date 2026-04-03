@@ -26,6 +26,7 @@ package = true
 [tool.ruff]
 target-version = "py311"
 include = ["src/**/*.py", "pyproject.toml", "tests/**/*.py", "scripts/**/*.py"]
+line-length = 80
 
 [tool.ruff.lint]
 ignore = [

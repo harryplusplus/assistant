@@ -1,6 +1,6 @@
 import pytest
 
-from assistant.codex import AppServer
+from assistant.codex.app_server import AppServer
 
 
 @pytest.mark.asyncio
