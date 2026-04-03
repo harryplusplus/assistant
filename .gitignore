@@ -42,6 +42,7 @@ htmlcov/
 .nox/
 .coverage
 .coverage.*
+.codex_schemas/
 .cache
 nosetests.xml
 coverage.xml
@@ -207,4 +208,4 @@ marimo/_lsp/
 __marimo__/
 
 # Codex app server
-/.schemas/
+/.codex_schemas/

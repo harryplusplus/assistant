@@ -169,6 +169,13 @@ class Codex:
 
         return response
 
+    async def _send_notification(self, method: str, params: JsonObject) -> None:
+        payload: JsonObject = {
+            "method": method,
+            "params": params,
+        }
+        await self._write(payload)
+
     async def _write(self, payload: JsonObject) -> None:
         process = self._process
         if process is None:
@@ -307,7 +314,7 @@ class Codex:
             msg = f"Unexpected initialize response result type: {type(result).__name__}"
             raise TypeError(msg)
 
-        await self._send("initialized", {})
+        await self._send_notification("initialized", {})
 
         user_agent = result.get("userAgent")
         logger.info("Initialized: user_agent=%s", user_agent)
