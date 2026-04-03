@@ -7,10 +7,6 @@ from typing_extensions import override
 from .config import Config
 
 
-def get_assistant_logger() -> logging.Logger:
-    return logging.getLogger("assistant")
-
-
 def _to_logging_level(value: str) -> int:
     return logging.getLevelNamesMapping()[value.upper()]
 
@@ -41,7 +37,4 @@ def configure_logger(config: Config) -> None:
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.WARNING)
-
-    get_assistant_logger().setLevel(_to_logging_level(config.assistant_log_level))
-    logging.getLogger("discord").setLevel(_to_logging_level(config.discord_log_level))
+    root_logger.setLevel(_to_logging_level(config.log_level))

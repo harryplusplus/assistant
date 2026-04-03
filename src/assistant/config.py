@@ -30,14 +30,12 @@ def _get_log_level_from_env(env_name: str) -> str:
 class Config:
     discord_token: str
     discord_guild_id: int
-    discord_log_level: str
-    assistant_log_level: str
+    log_level: str
 
     @classmethod
     def from_env(cls) -> Self:
         return cls(
             discord_token=_require_env("DISCORD_TOKEN"),
             discord_guild_id=int(_require_env("DISCORD_GUILD_ID")),
-            discord_log_level=_get_log_level_from_env("DISCORD_LOG_LEVEL"),
-            assistant_log_level=_get_log_level_from_env("ASSISTANT_LOG_LEVEL"),
+            log_level=_get_log_level_from_env("LOG_LEVEL"),
         )
