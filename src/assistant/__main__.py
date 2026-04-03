@@ -8,7 +8,11 @@ from functools import partial
 import discord
 from dotenv import load_dotenv
 
-from .codex.app_server import CodexAppServer
+from .codex.app_server import (
+    CodexAppServer,
+    ServerMessage,
+    ServerRequestResponse,
+)
 from .config import Config
 from .logger import configure_logger
 
@@ -162,7 +166,14 @@ async def _wait_for_shutdown(
 async def _async_main(config: Config) -> None:
     context = Context(config=config)
     stop_event = asyncio.Event()
-    app_server = CodexAppServer()
+    server_message_queue: asyncio.Queue[ServerMessage] = asyncio.Queue()
+    server_request_response_queue: asyncio.Queue[ServerRequestResponse] = (
+        asyncio.Queue()
+    )
+    app_server = CodexAppServer(
+        server_message_queue=server_message_queue,
+        server_request_response_queue=server_request_response_queue,
+    )
     client = MentionPrinterClient(context=context)
     discord_task: asyncio.Task[None] | None = None
 

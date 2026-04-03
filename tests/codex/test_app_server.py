@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from assistant.codex.app_server import CodexAppServer
@@ -5,7 +7,10 @@ from assistant.codex.app_server import CodexAppServer
 
 @pytest.mark.asyncio
 async def test_app_server_start_and_close() -> None:
-    app_server = CodexAppServer()
+    app_server = CodexAppServer(
+        server_message_queue=asyncio.Queue(),
+        server_request_response_queue=asyncio.Queue(),
+    )
 
     await app_server.start()
 
@@ -18,3 +23,4 @@ async def test_app_server_start_and_close() -> None:
     assert app_server._process is None
     assert app_server._stdout_task is None
     assert app_server._stderr_task is None
+    assert app_server._server_request_response_task is None

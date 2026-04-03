@@ -19,6 +19,8 @@ from .schemas.codex_app_server_protocol_schemas import (
     JsonrpcMessage,
     JsonrpcRequest,
     JsonrpcResponse,
+    ServerNotification,
+    ServerRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,8 +28,14 @@ stderr_logger = logging.getLogger(f"{__name__}.stderr")
 
 
 _MESSAGE_ADAPTER: TypeAdapter[JsonrpcMessage] = TypeAdapter(JsonrpcMessage)
+_SERVER_NOTIFICATION_ADAPTER: TypeAdapter[ServerNotification] = TypeAdapter(
+    ServerNotification
+)
+_SERVER_REQUEST_ADAPTER: TypeAdapter[ServerRequest] = TypeAdapter(ServerRequest)
 
 ModelType = TypeVar("ModelType", bound=BaseModel)
+ServerMessage = ServerRequest | ServerNotification
+ServerRequestResponse = JsonrpcResponse | JsonrpcError
 
 
 @dataclass(slots=True, init=False)
@@ -55,11 +63,19 @@ _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
 
 
 class CodexAppServer:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        server_message_queue: asyncio.Queue[ServerMessage],
+        server_request_response_queue: asyncio.Queue[ServerRequestResponse],
+    ) -> None:
+        self._server_message_queue = server_message_queue
+        self._server_request_response_queue = server_request_response_queue
         self._process: asyncio.subprocess.Process | None = None
         self._stdin: asyncio.StreamWriter | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
+        self._server_request_response_task: asyncio.Task[None] | None = None
         self._next_request_id = 0
         self._pending: dict[int, asyncio.Future[object]] = {}
 
@@ -85,6 +101,9 @@ class CodexAppServer:
 
             self._stdout_task = asyncio.create_task(self._stdout_loop(stdout))
             self._stderr_task = asyncio.create_task(self._stderr_loop(stderr))
+            self._server_request_response_task = asyncio.create_task(
+                self._server_request_response_loop()
+            )
             await self._initialize()
             await self._initialized()
         except BaseException:
@@ -184,7 +203,10 @@ class CodexAppServer:
         self._next_request_id += 1
         return request_id
 
-    async def _write(self, message: ClientRequest | ClientNotification) -> None:
+    async def _write(
+        self,
+        message: ClientRequest | ClientNotification | ServerRequestResponse,
+    ) -> None:
         stdin = self._stdin
         if stdin is None or stdin.is_closing():
             msg = "Stdin is not available."
@@ -217,6 +239,8 @@ class CodexAppServer:
                         "Failed to handle message: %s",
                         json_bytes.decode(errors="replace"),
                     )
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Failed to read from stdout.")
         finally:
@@ -230,8 +254,20 @@ class CodexAppServer:
                     break
 
                 stderr_logger.warning(line.decode(errors="replace").rstrip())
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Failed to read from stderr.")
+
+    async def _server_request_response_loop(self) -> None:
+        try:
+            while True:
+                response = await self._server_request_response_queue.get()
+                await self._write(response)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to write server request response.")
 
     def _handle_message(self, message: JsonrpcMessage) -> None:
         if isinstance(message, JsonrpcResponse):
@@ -253,16 +289,15 @@ class CodexAppServer:
                 )
             )
         elif isinstance(message, JsonrpcRequest):
-            logger.warning(
-                "Received unexpected request from server: %s", message.method
+            self._server_message_queue.put_nowait(
+                _SERVER_REQUEST_ADAPTER.validate_python(message.model_dump())
             )
-            # TODO: Implement server requests.
         else:  # JsonrpcNotification
-            logger.warning(
-                "Received unexpected notification from server: %s",
-                message.method,
+            self._server_message_queue.put_nowait(
+                _SERVER_NOTIFICATION_ADAPTER.validate_python(
+                    message.model_dump()
+                )
             )
-            # TODO: Implement server notifications.
 
     def _pop_pending(
         self,
@@ -304,14 +339,16 @@ class CodexAppServer:
             future.set_exception(error)
 
     async def _close_tasks(self) -> None:
-        tasks = [
+        drain_tasks = [
             ("stdout", self._stdout_task),
             ("stderr", self._stderr_task),
         ]
+        cancel_tasks = [self._server_request_response_task]
         self._stdout_task = None
         self._stderr_task = None
+        self._server_request_response_task = None
 
-        for task_name, task in tasks:
+        for task_name, task in drain_tasks:
             if task is None:
                 continue
 
@@ -329,6 +366,15 @@ class CodexAppServer:
 
                 with suppress(asyncio.CancelledError):
                     await task
+
+        for task in cancel_tasks:
+            if task is None:
+                continue
+
+            task.cancel()
+
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def _initialize(self) -> None:
         result = await self.send_request(
