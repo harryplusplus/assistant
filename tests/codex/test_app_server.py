@@ -1,11 +1,11 @@
 import pytest
 
-from assistant.codex.app_server import AppServer
+from assistant.codex.app_server import CodexAppServer
 
 
 @pytest.mark.asyncio
 async def test_app_server_start_and_close() -> None:
-    app_server = AppServer()
+    app_server = CodexAppServer()
 
     await app_server.start()
 

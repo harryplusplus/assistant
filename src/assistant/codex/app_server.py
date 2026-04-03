@@ -54,7 +54,7 @@ _REQUEST_TIMEOUT_SECONDS: Final = 10.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
 
 
-class AppServer:
+class CodexAppServer:
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
         self._stdin: asyncio.StreamWriter | None = None
@@ -65,7 +65,7 @@ class AppServer:
 
     async def start(self) -> None:
         if self._process is not None:
-            msg = "AppServer is already running."
+            msg = "CodexAppServer is already running."
             raise RuntimeError(msg)
 
         try:

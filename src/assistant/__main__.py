@@ -8,7 +8,7 @@ from functools import partial
 import discord
 from dotenv import load_dotenv
 
-from .codex import AppServer
+from .codex.app_server import CodexAppServer
 from .config import Config
 from .logger import configure_logger
 
@@ -45,7 +45,9 @@ class MentionPrinterClient(discord.Client):
         if self.user is None:
             return
         logger.info("Logged in as %s (%s)", self.user, self.user.id)
-        logger.info("Watching guild id=%s", self.context.config.discord_guild_id)
+        logger.info(
+            "Watching guild id=%s", self.context.config.discord_guild_id
+        )
         self.ready_event.set()
 
     async def on_message(self, message: discord.Message) -> None:
@@ -78,10 +80,14 @@ class MentionPrinterClient(discord.Client):
         ):
             return
 
-        logger.info("[%s] %s: %s", message.channel, message.author, message.content)
+        logger.info(
+            "[%s] %s: %s", message.channel, message.author, message.content
+        )
 
 
-def _handle_shutdown_signal(stop_event: asyncio.Event, signum: signal.Signals) -> None:
+def _handle_shutdown_signal(
+    stop_event: asyncio.Event, signum: signal.Signals
+) -> None:
     if stop_event.is_set():
         return
     logger.info("Received shutdown signal: %s", signum.name)
@@ -107,7 +113,9 @@ async def _wait_for_discord_ready(
     discord_task: asyncio.Task[None],
     stop_event: asyncio.Event,
 ) -> bool:
-    ready_task = asyncio.create_task(client.ready_event.wait(), name="discord-ready")
+    ready_task = asyncio.create_task(
+        client.ready_event.wait(), name="discord-ready"
+    )
     stop_task = asyncio.create_task(stop_event.wait(), name="shutdown-wait")
     done, pending = await asyncio.wait(
         {ready_task, stop_task, discord_task},
@@ -154,7 +162,7 @@ async def _wait_for_shutdown(
 async def _async_main(config: Config) -> None:
     context = Context(config=config)
     stop_event = asyncio.Event()
-    app_server = AppServer()
+    app_server = CodexAppServer()
     client = MentionPrinterClient(context=context)
     discord_task: asyncio.Task[None] | None = None
 

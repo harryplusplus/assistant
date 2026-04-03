@@ -14,7 +14,10 @@ def _require_env(name: str) -> str:
 def _parse_log_level(*, value: str, env_name: str) -> str:
     log_level = value.lower()
     if log_level not in {"debug", "info", "warning", "error"}:
-        msg = f"{env_name} must be one of debug, info, warning, error: got {value!r}."
+        msg = (
+            f"{env_name} must be one of debug, info, warning, error: "
+            f"got {value!r}."
+        )
         raise ValueError(msg)
     return log_level
 
