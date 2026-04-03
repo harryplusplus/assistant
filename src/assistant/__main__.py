@@ -4,6 +4,7 @@ import signal
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
+from typing import TypeGuard
 
 import discord
 from dotenv import load_dotenv
@@ -13,10 +14,26 @@ from .codex.app_server import (
     ServerMessage,
     ServerRequestResponse,
 )
+from .codex.client import CodexClient
+from .codex.schemas.codex_app_server_protocol_schemas import (
+    ItemAgentMessageDeltaNotification,
+    ItemCompletedNotification,
+    JsonrpcError,
+    JsonrpcErrorError,
+    ServerRequest,
+    TextUserInput,
+    TurnCompletedNotification,
+    V2ThreadStartParams,
+    V2TurnStartParams,
+)
 from .config import Config
 from .logger import configure_logger
+from .state_store import MemoryStateStore, TurnOutputState
 
 logger = logging.getLogger(__name__)
+_THINKING_MESSAGE = "_Thinking..._"
+_DISCORD_MESSAGE_LIMIT = 2000
+_THREAD_TITLE_LIMIT = 60
 
 
 def _mentions_bot_user(*, message: discord.Message, bot_user_id: int) -> bool:
@@ -33,6 +50,8 @@ def _preview_text(text: str, *, limit: int = 30) -> str:
 @dataclass(frozen=True, slots=True)
 class Context:
     config: Config
+    codex_client: CodexClient
+    state_store: MemoryStateStore
 
 
 class MentionPrinterClient(discord.Client):
@@ -84,9 +103,313 @@ class MentionPrinterClient(discord.Client):
         ):
             return
 
-        logger.info(
-            "[%s] %s: %s", message.channel, message.author, message.content
+        prompt = _strip_bot_mention(
+            content=message.content,
+            bot_user_id=self.user.id,
         )
+        if not prompt:
+            await message.reply(
+                "멘션 뒤에 메시지 내용을 넣어주세요.",
+                mention_author=False,
+            )
+            return
+
+        discord_thread: discord.Thread | None = None
+        output_message: discord.Message | None = None
+        try:
+            discord_thread = await self._ensure_discord_thread(
+                message=message,
+                prompt=prompt,
+            )
+            codex_thread_id = await self._ensure_codex_thread_id(
+                discord_thread_channel_id=discord_thread.id
+            )
+
+            output_message = await discord_thread.send(_THINKING_MESSAGE)
+            turn_response = await self.context.codex_client.start_turn(
+                V2TurnStartParams(
+                    approvalPolicy="never",
+                    threadId=codex_thread_id,
+                    input=[TextUserInput(type="text", text=prompt)],
+                )
+            )
+            await self.context.state_store.create_turn_output(
+                codex_turn_id=turn_response.turn.id,
+                codex_thread_id=codex_thread_id,
+                discord_thread_channel_id=discord_thread.id,
+                discord_message_id=output_message.id,
+            )
+            logger.info(
+                "Started Codex turn: discord_thread_channel_id=%s "
+                "codex_thread_id=%s codex_turn_id=%s",
+                discord_thread.id,
+                codex_thread_id,
+                turn_response.turn.id,
+            )
+        except Exception:
+            logger.exception("Failed to handle Discord mention.")
+            if output_message is not None:
+                await _safe_edit_message(
+                    output_message,
+                    "요청을 시작하지 못했습니다.",
+                )
+            elif discord_thread is not None:
+                await discord_thread.send("요청을 시작하지 못했습니다.")
+            else:
+                await message.reply(
+                    "요청을 시작하지 못했습니다.",
+                    mention_author=False,
+                )
+
+    async def _ensure_discord_thread(
+        self, *, message: discord.Message, prompt: str
+    ) -> discord.Thread:
+        if isinstance(message.channel, discord.Thread):
+            return message.channel
+
+        return await message.create_thread(name=_build_thread_name(prompt))
+
+    async def _ensure_codex_thread_id(
+        self, *, discord_thread_channel_id: int
+    ) -> str:
+        codex_thread_id = await self.context.state_store.get_codex_thread_id(
+            discord_thread_channel_id=discord_thread_channel_id
+        )
+        if codex_thread_id is not None:
+            return codex_thread_id
+
+        thread_response = await self.context.codex_client.start_thread(
+            V2ThreadStartParams(approvalPolicy="never")
+        )
+        codex_thread_id = thread_response.thread.id
+        await self.context.state_store.set_codex_thread_id(
+            discord_thread_channel_id=discord_thread_channel_id,
+            codex_thread_id=codex_thread_id,
+        )
+        logger.info(
+            "Bound Discord thread to Codex thread: "
+            "discord_thread_channel_id=%s codex_thread_id=%s",
+            discord_thread_channel_id,
+            codex_thread_id,
+        )
+        return codex_thread_id
+
+
+def _strip_bot_mention(*, content: str, bot_user_id: int) -> str:
+    stripped = content.replace(f"<@{bot_user_id}>", "").replace(
+        f"<@!{bot_user_id}>",
+        "",
+    )
+    return stripped.strip()
+
+
+def _build_thread_name(prompt: str) -> str:
+    title = prompt.replace("\n", " ").strip()
+    if not title:
+        return "assistant"
+    if len(title) <= _THREAD_TITLE_LIMIT:
+        return title
+    return f"{title[:_THREAD_TITLE_LIMIT - 3]}..."
+
+
+def _render_output_text(text: str) -> str:
+    if not text:
+        return _THINKING_MESSAGE
+    if len(text) <= _DISCORD_MESSAGE_LIMIT:
+        return text
+    suffix = "\n...[truncated]"
+    return f"{text[: _DISCORD_MESSAGE_LIMIT - len(suffix)]}{suffix}"
+
+
+def _is_server_request(message: ServerMessage) -> TypeGuard[ServerRequest]:
+    return hasattr(message, "id")
+
+
+async def _safe_edit_message(
+    message: discord.Message | discord.PartialMessage, content: str
+) -> None:
+    try:
+        await message.edit(content=_render_output_text(content))
+    except discord.HTTPException:
+        logger.exception("Failed to edit Discord message: id=%s", message.id)
+
+
+async def _get_output_message(
+    *,
+    client: MentionPrinterClient,
+    turn_output: TurnOutputState,
+) -> discord.Message | discord.PartialMessage | None:
+    cached_message = discord.utils.get(
+        client.cached_messages,
+        id=turn_output.discord_message_id,
+    )
+    if cached_message is not None:
+        return cached_message
+
+    channel = client.get_channel(turn_output.discord_thread_channel_id)
+    if channel is None:
+        fetched_channel = await client.fetch_channel(
+            turn_output.discord_thread_channel_id
+        )
+        channel = fetched_channel
+
+    if not isinstance(channel, discord.Thread):
+        logger.warning(
+            "Expected Discord thread channel: id=%s type=%s",
+            turn_output.discord_thread_channel_id,
+            type(channel).__name__,
+        )
+        return None
+
+    return channel.get_partial_message(turn_output.discord_message_id)
+
+
+async def _update_turn_output_message(
+    *,
+    client: MentionPrinterClient,
+    turn_output: TurnOutputState,
+) -> None:
+    message = await _get_output_message(
+        client=client,
+        turn_output=turn_output,
+    )
+    if message is None:
+        return
+    await _safe_edit_message(message, turn_output.text)
+
+
+async def _handle_server_request(
+    *,
+    message: ServerMessage,
+    server_request_response_queue: asyncio.Queue[ServerRequestResponse],
+) -> None:
+    if not _is_server_request(message):
+        return
+
+    logger.warning("Unsupported Codex server request: %s", message.method)
+    server_request_response_queue.put_nowait(
+        JsonrpcError(
+            id=message.id,
+            error=JsonrpcErrorError(
+                code=-32000,
+                message=f"Unsupported server request: {message.method}",
+            ),
+        )
+    )
+
+
+async def _handle_agent_message_delta(
+    *,
+    client: MentionPrinterClient,
+    state_store: MemoryStateStore,
+    notification: ItemAgentMessageDeltaNotification,
+) -> None:
+    turn_output = await state_store.append_turn_output_delta(
+        codex_turn_id=notification.params.turnId,
+        item_id=notification.params.itemId,
+        delta=notification.params.delta,
+    )
+    if turn_output is None:
+        return
+    await _update_turn_output_message(client=client, turn_output=turn_output)
+
+
+async def _handle_item_completed(
+    *,
+    client: MentionPrinterClient,
+    state_store: MemoryStateStore,
+    notification: ItemCompletedNotification,
+) -> None:
+    item = notification.params.item
+    if getattr(item, "type", None) != "agentMessage":
+        return
+
+    text = getattr(item, "text", None)
+    item_id = getattr(item, "id", None)
+    if not isinstance(text, str):
+        return
+
+    turn_output = await state_store.set_turn_output_text(
+        codex_turn_id=notification.params.turnId,
+        item_id=item_id if isinstance(item_id, str) else None,
+        text=text,
+    )
+    if turn_output is None:
+        return
+    await _update_turn_output_message(client=client, turn_output=turn_output)
+
+
+async def _handle_turn_completed(
+    *,
+    client: MentionPrinterClient,
+    state_store: MemoryStateStore,
+    notification: TurnCompletedNotification,
+) -> None:
+    turn_output = await state_store.get_turn_output(
+        codex_turn_id=notification.params.turn.id
+    )
+    if turn_output is None:
+        return
+
+    turn_error = notification.params.turn.error
+    if turn_error is not None and not turn_output.text:
+        turn_output = await state_store.set_turn_output_text(
+            codex_turn_id=notification.params.turn.id,
+            item_id=turn_output.agent_message_item_id,
+            text=f"Error: {turn_error.message}",
+        )
+        if turn_output is not None:
+            await _update_turn_output_message(
+                client=client,
+                turn_output=turn_output,
+            )
+
+    await state_store.delete_turn_output(
+        codex_turn_id=notification.params.turn.id
+    )
+
+
+async def _consume_codex_server_messages(
+    *,
+    client: MentionPrinterClient,
+    state_store: MemoryStateStore,
+    server_message_queue: asyncio.Queue[ServerMessage],
+    server_request_response_queue: asyncio.Queue[ServerRequestResponse],
+) -> None:
+    while True:
+        message = await server_message_queue.get()
+
+        try:
+            if isinstance(message, ItemAgentMessageDeltaNotification):
+                await _handle_agent_message_delta(
+                    client=client,
+                    state_store=state_store,
+                    notification=message,
+                )
+            elif isinstance(message, ItemCompletedNotification):
+                await _handle_item_completed(
+                    client=client,
+                    state_store=state_store,
+                    notification=message,
+                )
+            elif isinstance(message, TurnCompletedNotification):
+                await _handle_turn_completed(
+                    client=client,
+                    state_store=state_store,
+                    notification=message,
+                )
+            else:
+                await _handle_server_request(
+                    message=message,
+                    server_request_response_queue=server_request_response_queue,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to handle Codex server message: %s",
+                getattr(message, "method", type(message).__name__),
+            )
 
 
 def _handle_shutdown_signal(
@@ -126,11 +449,11 @@ async def _wait_for_discord_ready(
         return_when=asyncio.FIRST_COMPLETED,
     )
 
-    for task in pending:
-        task.cancel()
-    for task in pending:
-        with suppress(asyncio.CancelledError):
-            await task
+    for task in (ready_task, stop_task):
+        if task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     if discord_task in done:
         await discord_task
@@ -151,11 +474,10 @@ async def _wait_for_shutdown(
         return_when=asyncio.FIRST_COMPLETED,
     )
 
-    for task in pending:
-        task.cancel()
-    for task in pending:
+    if stop_task in pending:
+        stop_task.cancel()
         with suppress(asyncio.CancelledError):
-            await task
+            await stop_task
 
     if discord_task in done:
         await discord_task
@@ -164,7 +486,7 @@ async def _wait_for_shutdown(
 
 
 async def _async_main(config: Config) -> None:
-    context = Context(config=config)
+    state_store = MemoryStateStore()
     stop_event = asyncio.Event()
     server_message_queue: asyncio.Queue[ServerMessage] = asyncio.Queue()
     server_request_response_queue: asyncio.Queue[ServerRequestResponse] = (
@@ -174,7 +496,14 @@ async def _async_main(config: Config) -> None:
         server_message_queue=server_message_queue,
         server_request_response_queue=server_request_response_queue,
     )
+    codex_client = CodexClient(app_server=app_server)
+    context = Context(
+        config=config,
+        codex_client=codex_client,
+        state_store=state_store,
+    )
     client = MentionPrinterClient(context=context)
+    codex_server_message_task: asyncio.Task[None] | None = None
     discord_task: asyncio.Task[None] | None = None
 
     _install_signal_handlers(stop_event)
@@ -182,6 +511,16 @@ async def _async_main(config: Config) -> None:
     try:
         await app_server.start()
         logger.info("Internal initialization completed")
+
+        codex_server_message_task = asyncio.create_task(
+            _consume_codex_server_messages(
+                client=client,
+                state_store=state_store,
+                server_message_queue=server_message_queue,
+                server_request_response_queue=server_request_response_queue,
+            ),
+            name="codex-server-messages",
+        )
 
         if stop_event.is_set():
             return
@@ -205,6 +544,11 @@ async def _async_main(config: Config) -> None:
         )
     finally:
         try:
+            if codex_server_message_task is not None:
+                codex_server_message_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await codex_server_message_task
+
             if discord_task is not None:
                 logger.info("Starting external graceful shutdown")
                 await client.close()
