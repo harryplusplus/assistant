@@ -1,59 +1,32 @@
 import asyncio
-import json
 import logging
 from contextlib import suppress
 from importlib.metadata import version
 from typing import Final
 
-import pydantic
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
+from pydantic import TypeAdapter, ValidationError
+
+from .schemas.codex_app_server_protocol_schemas import (
+    ClientInfo,
+    ClientNotification,
+    ClientRequest,
+    InitializedNotification,
+    InitializeParams,
+    InitializeRequest,
+    InitializeResponse,
+    JsonrpcError,
+    JsonrpcMessage,
+    JsonrpcRequest,
+    JsonrpcResponse,
+)
 
 logger = logging.getLogger(__name__)
 stderr_logger = logging.getLogger(f"{__name__}.stderr")
-
-RpcRequestId = int | str
-JsonObject = dict[str, JsonValue]
+_jsonrpc_message_adapter: TypeAdapter[JsonrpcMessage] = TypeAdapter(JsonrpcMessage)
 
 
-class RpcBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class RpcRequest(RpcBase):
-    id: RpcRequestId
-    method: str
-    params: JsonObject
-
-
-class RpcNotification(RpcBase):
-    method: str
-    params: JsonObject
-
-
-class RpcResultResponse(RpcBase):
-    id: RpcRequestId
-    result: JsonValue
-
-
-class RpcError(RpcBase):
-    code: int
-    message: str
-    data: JsonValue | None = None
-
-
-class RpcErrorResponse(RpcBase):
-    id: RpcRequestId
-    error: RpcError
-
-
-RpcResponse = RpcResultResponse | RpcErrorResponse
-
-RpcMessage = RpcRequest | RpcNotification | RpcResponse
-_rpc_message_adapter: TypeAdapter[RpcMessage] = TypeAdapter(RpcMessage)
-
-
-class CodexResponseError(Exception):
-    def __init__(self, code: int, message: str, data: JsonValue | None = None) -> None:
+class AppServerResponseError(Exception):
+    def __init__(self, code: int, message: str, data: object | None = None) -> None:
         super().__init__(f"Request failed: {code} {message}")
         self.code = code
         self.message = message
@@ -68,27 +41,17 @@ _INITIALIZE_TIMEOUT_SECONDS: Final = 10.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
 
 
-def _build_initialize_params() -> JsonObject:
-    return {
-        "clientInfo": {
-            "name": "assistant",
-            "title": "Assistant",
-            "version": version("assistant"),
-        },
-    }
-
-
-class Codex:
+class AppServer:
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._next_request_id = 0
-        self._pending: dict[int, asyncio.Future[RpcResponse]] = {}
+        self._pending: dict[int, asyncio.Future[JsonrpcResponse | JsonrpcError]] = {}
 
     async def start(self) -> None:
         if self._process is not None:
-            msg = "Codex app-server is already running."
+            msg = "AppServer is already running."
             raise RuntimeError(msg)
 
         self._process = await asyncio.create_subprocess_exec(
@@ -103,6 +66,7 @@ class Codex:
             self._stderr_task = asyncio.create_task(self._read_stderr())
 
             await self._initialize()
+            await self._initialized()
         except Exception:
             await self.close()
             raise
@@ -139,19 +103,19 @@ class Codex:
         await self._await_background_tasks()
         logger.info("Stopped")
 
-    async def _send_request(self, method: str, params: JsonObject) -> RpcResultResponse:
-        request_id = self._get_next_request_id()
-        future: asyncio.Future[RpcResponse] = asyncio.get_running_loop().create_future()
+    async def _send_request(self, request: ClientRequest) -> JsonrpcResponse:
+        request_id = request.id
+        if not isinstance(request_id, int):
+            msg = f"Client request id must be int: got {request_id!r}"
+            raise TypeError(msg)
+
+        future: asyncio.Future[JsonrpcResponse | JsonrpcError] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._pending[request_id] = future
 
-        payload: JsonObject = {
-            "id": request_id,
-            "method": method,
-            "params": params,
-        }
-
         try:
-            await self._write(payload)
+            await self._write(request)
             response = await future
         except BaseException:
             self._pending.pop(request_id, None)
@@ -159,9 +123,9 @@ class Codex:
                 future.cancel()
             raise
 
-        if isinstance(response, RpcErrorResponse):
+        if isinstance(response, JsonrpcError):
             error = response.error
-            raise CodexResponseError(
+            raise AppServerResponseError(
                 code=error.code,
                 message=error.message,
                 data=error.data,
@@ -169,14 +133,7 @@ class Codex:
 
         return response
 
-    async def _send_notification(self, method: str, params: JsonObject) -> None:
-        payload: JsonObject = {
-            "method": method,
-            "params": params,
-        }
-        await self._write(payload)
-
-    async def _write(self, payload: JsonObject) -> None:
+    async def _write(self, payload: ClientRequest | ClientNotification) -> None:
         process = self._process
         if process is None:
             msg = "Not running."
@@ -187,7 +144,7 @@ class Codex:
             msg = "Stdin is not available."
             raise RuntimeError(msg)
 
-        stdin.write((json.dumps(payload) + "\n").encode())
+        stdin.write((payload.model_dump_json() + "\n").encode())
         await stdin.drain()
 
     def _get_next_request_id(self) -> int:
@@ -210,8 +167,8 @@ class Codex:
                     break
 
                 try:
-                    message = _rpc_message_adapter.validate_json(line.rstrip())
-                except pydantic.ValidationError:
+                    message = _jsonrpc_message_adapter.validate_json(line.rstrip())
+                except ValidationError:
                     logger.exception(
                         "Failed to parse RPC message: %s",
                         line.decode(errors="replace").rstrip(),
@@ -222,8 +179,8 @@ class Codex:
         finally:
             self._fail_pending(RuntimeError("stdout closed."))
 
-    def _handle_rpc_message(self, message: RpcMessage) -> None:
-        if isinstance(message, RpcResponse):
+    def _handle_rpc_message(self, message: JsonrpcMessage) -> None:
+        if isinstance(message, (JsonrpcResponse, JsonrpcError)):
             future = self._pop_pending_client_request(message)
             if future is None:
                 return
@@ -235,12 +192,12 @@ class Codex:
                 return
 
             future.set_result(message)
-        elif isinstance(message, RpcRequest):
+        elif isinstance(message, JsonrpcRequest):
             logger.warning(
                 "Received unexpected request from server: %s", message.method
             )
             # TODO: Implement server requests.
-        else:  # RpcNotification
+        else:  # JsonrpcNotification
             logger.warning(
                 "Received unexpected notification from server: %s", message.method
             )
@@ -248,8 +205,8 @@ class Codex:
 
     def _pop_pending_client_request(
         self,
-        response: RpcResponse,
-    ) -> asyncio.Future[RpcResponse] | None:
+        response: JsonrpcResponse | JsonrpcError,
+    ) -> asyncio.Future[JsonrpcResponse | JsonrpcError] | None:
         request_id = response.id
         if not isinstance(request_id, int):
             logger.warning(
@@ -304,17 +261,26 @@ class Codex:
                 await task
 
     async def _initialize(self) -> None:
+        request_id = self._get_next_request_id()
         response = await asyncio.wait_for(
-            self._send_request("initialize", _build_initialize_params()),
+            self._send_request(
+                InitializeRequest(
+                    id=request_id,
+                    method="initialize",
+                    params=InitializeParams(
+                        clientInfo=ClientInfo(
+                            name="assistant",
+                            title="Assistant",
+                            version=version("assistant"),
+                        )
+                    ),
+                )
+            ),
             timeout=_INITIALIZE_TIMEOUT_SECONDS,
         )
 
-        result = response.result
-        if not isinstance(result, dict):
-            msg = f"Unexpected initialize response result type: {type(result).__name__}"
-            raise TypeError(msg)
+        initialize_response = InitializeResponse.model_validate(response.result)
+        logger.info("Initialized: user_agent=%s", initialize_response.userAgent)
 
-        await self._send_notification("initialized", {})
-
-        user_agent = result.get("userAgent")
-        logger.info("Initialized: user_agent=%s", user_agent)
+    async def _initialized(self) -> None:
+        await self._write(InitializedNotification(method="initialized"))

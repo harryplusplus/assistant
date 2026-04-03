@@ -1,3 +1,3 @@
-from .codex import Codex, CodexResponseError
+from .app_server import AppServer, AppServerResponseError
 
-__all__ = ["Codex", "CodexResponseError"]
+__all__ = ["AppServer", "AppServerResponseError"]

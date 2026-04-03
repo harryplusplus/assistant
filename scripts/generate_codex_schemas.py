@@ -25,6 +25,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_SCHEMA_DIR = REPO_ROOT / ".codex_schemas"
 OUTPUT_DIR = REPO_ROOT / "src/assistant/codex/schemas"
+ROOT_SCHEMA_FILENAME = "codex_app_server_protocol.schemas.json"
 CODEX_COMMAND = (
     "codex",
     "app-server",
@@ -605,19 +606,23 @@ def _looks_like_schema_definition(value: JsonObject) -> bool:
 
 def _discover_schema_files(schema_root: Path) -> dict[Path, SchemaFile]:
     schema_files: dict[Path, SchemaFile] = {}
-    for schema_path in sorted(schema_root.rglob("*.json")):
-        relative_path = schema_path.relative_to(schema_root)
-        schema = json.loads(schema_path.read_text())
-        type_name = _to_type_name(schema.get("title", schema_path.stem))
-        module_parts = tuple(_to_module_name(part) for part in relative_path.with_suffix("").parts)
-        output_path = OUTPUT_DIR.joinpath(*module_parts).with_suffix(".py")
-        schema_files[relative_path] = SchemaFile(
-            schema_path=schema_path,
-            output_path=output_path,
-            module_parts=module_parts,
-            type_name=type_name,
-            schema=schema,
-        )
+    schema_path = schema_root / ROOT_SCHEMA_FILENAME
+    if not schema_path.exists():
+        msg = f"Missing root schema: {schema_path}"
+        raise FileNotFoundError(msg)
+
+    relative_path = schema_path.relative_to(schema_root)
+    schema = json.loads(schema_path.read_text())
+    type_name = _to_type_name(schema.get("title", schema_path.stem))
+    module_parts = tuple(_to_module_name(part) for part in relative_path.with_suffix("").parts)
+    output_path = OUTPUT_DIR.joinpath(*module_parts).with_suffix(".py")
+    schema_files[relative_path] = SchemaFile(
+        schema_path=schema_path,
+        output_path=output_path,
+        module_parts=module_parts,
+        type_name=type_name,
+        schema=schema,
+    )
     return schema_files
 
 

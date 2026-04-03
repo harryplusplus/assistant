@@ -8,7 +8,7 @@ from functools import partial
 import discord
 from dotenv import load_dotenv
 
-from .codex import Codex
+from .codex import AppServer
 from .config import Config
 from .logger import configure_logger
 
@@ -154,14 +154,14 @@ async def _wait_for_shutdown(
 async def _async_main(config: Config) -> None:
     context = Context(config=config)
     stop_event = asyncio.Event()
-    codex = Codex()
+    app_server = AppServer()
     client = MentionPrinterClient(context=context)
     discord_task: asyncio.Task[None] | None = None
 
     _install_signal_handlers(stop_event)
 
     try:
-        await codex.start()
+        await app_server.start()
         logger.info("Internal initialization completed")
 
         if stop_event.is_set():
@@ -192,7 +192,7 @@ async def _async_main(config: Config) -> None:
                 await discord_task
         finally:
             logger.info("Starting internal graceful shutdown")
-            await codex.close()
+            await app_server.close()
 
 
 def main() -> None:
