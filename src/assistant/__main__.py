@@ -8,6 +8,7 @@ from typing import TypeGuard
 
 import discord
 from dotenv import load_dotenv
+from typing_extensions import override
 
 from .codex.app_server import (
     CodexAppServer,
@@ -16,7 +17,6 @@ from .codex.app_server import (
 )
 from .codex.client import CodexClient
 from .codex.schemas.codex_app_server_protocol_schemas import (
-    ItemAgentMessageDeltaNotification,
     ItemCompletedNotification,
     JsonrpcError,
     JsonrpcErrorError,
@@ -28,10 +28,9 @@ from .codex.schemas.codex_app_server_protocol_schemas import (
 )
 from .config import Config
 from .logger import configure_logger
-from .state_store import MemoryStateStore, TurnOutputState
+from .state_store import MemoryStateStore
 
 logger = logging.getLogger(__name__)
-_THINKING_MESSAGE = "_Thinking..._"
 _DISCORD_MESSAGE_LIMIT = 2000
 _THREAD_TITLE_LIMIT = 60
 
@@ -63,6 +62,7 @@ class MentionPrinterClient(discord.Client):
         super().__init__(intents=intents)
         self.context = context
         self.ready_event = asyncio.Event()
+        self._turn_typing_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def on_ready(self) -> None:
         if self.user is None:
@@ -115,32 +115,34 @@ class MentionPrinterClient(discord.Client):
             return
 
         discord_thread: discord.Thread | None = None
-        output_message: discord.Message | None = None
         try:
             discord_thread = await self._ensure_discord_thread(
                 message=message,
                 prompt=prompt,
             )
             codex_thread_id = await self._ensure_codex_thread_id(
-                discord_thread_channel_id=discord_thread.id
+                discord_thread_id=discord_thread.id
             )
 
-            output_message = await discord_thread.send(_THINKING_MESSAGE)
-            turn_response = await self.context.codex_client.start_turn(
-                V2TurnStartParams(
-                    approvalPolicy="never",
-                    threadId=codex_thread_id,
-                    input=[TextUserInput(type="text", text=prompt)],
+            async with discord_thread.typing():
+                turn_response = await self.context.codex_client.start_turn(
+                    V2TurnStartParams(
+                        approvalPolicy="never",
+                        threadId=codex_thread_id,
+                        input=[TextUserInput(type="text", text=prompt)],
+                    )
                 )
-            )
-            await self.context.state_store.create_turn_output(
+            await self.context.state_store.create_turn(
                 codex_turn_id=turn_response.turn.id,
                 codex_thread_id=codex_thread_id,
-                discord_thread_channel_id=discord_thread.id,
-                discord_message_id=output_message.id,
+                discord_thread_id=discord_thread.id,
+            )
+            self.start_turn_typing(
+                codex_turn_id=turn_response.turn.id,
+                discord_thread=discord_thread,
             )
             logger.info(
-                "Started Codex turn: discord_thread_channel_id=%s "
+                "Started Codex turn: discord_thread_id=%s "
                 "codex_thread_id=%s codex_turn_id=%s",
                 discord_thread.id,
                 codex_thread_id,
@@ -148,12 +150,7 @@ class MentionPrinterClient(discord.Client):
             )
         except Exception:
             logger.exception("Failed to handle Discord mention.")
-            if output_message is not None:
-                await _safe_edit_message(
-                    output_message,
-                    "요청을 시작하지 못했습니다.",
-                )
-            elif discord_thread is not None:
+            if discord_thread is not None:
                 await discord_thread.send("요청을 시작하지 못했습니다.")
             else:
                 await message.reply(
@@ -169,11 +166,9 @@ class MentionPrinterClient(discord.Client):
 
         return await message.create_thread(name=_build_thread_name(prompt))
 
-    async def _ensure_codex_thread_id(
-        self, *, discord_thread_channel_id: int
-    ) -> str:
+    async def _ensure_codex_thread_id(self, *, discord_thread_id: int) -> str:
         codex_thread_id = await self.context.state_store.get_codex_thread_id(
-            discord_thread_channel_id=discord_thread_channel_id
+            discord_thread_id=discord_thread_id
         )
         if codex_thread_id is not None:
             return codex_thread_id
@@ -183,16 +178,60 @@ class MentionPrinterClient(discord.Client):
         )
         codex_thread_id = thread_response.thread.id
         await self.context.state_store.set_codex_thread_id(
-            discord_thread_channel_id=discord_thread_channel_id,
+            discord_thread_id=discord_thread_id,
             codex_thread_id=codex_thread_id,
         )
         logger.info(
             "Bound Discord thread to Codex thread: "
-            "discord_thread_channel_id=%s codex_thread_id=%s",
-            discord_thread_channel_id,
+            "discord_thread_id=%s codex_thread_id=%s",
+            discord_thread_id,
             codex_thread_id,
         )
         return codex_thread_id
+
+    def start_turn_typing(
+        self, *, codex_turn_id: str, discord_thread: discord.Thread
+    ) -> None:
+        existing_task = self._turn_typing_tasks.pop(codex_turn_id, None)
+        if existing_task is not None:
+            existing_task.cancel()
+
+        self._turn_typing_tasks[codex_turn_id] = asyncio.create_task(
+            self._typing_loop(discord_thread=discord_thread),
+            name=f"discord-typing-{codex_turn_id}",
+        )
+
+    async def stop_turn_typing(self, *, codex_turn_id: str) -> None:
+        task = self._turn_typing_tasks.pop(codex_turn_id, None)
+        if task is None:
+            return
+
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _typing_loop(self, *, discord_thread: discord.Thread) -> None:
+        try:
+            async with discord_thread.typing():
+                await asyncio.get_running_loop().create_future()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to send typing indicator: discord_thread_id=%s",
+                discord_thread.id,
+            )
+
+    @override
+    async def close(self) -> None:
+        typing_tasks = list(self._turn_typing_tasks.values())
+        self._turn_typing_tasks.clear()
+        for task in typing_tasks:
+            task.cancel()
+        for task in typing_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        await super().close()
 
 
 def _strip_bot_mention(*, content: str, bot_user_id: int) -> str:
@@ -213,8 +252,6 @@ def _build_thread_name(prompt: str) -> str:
 
 
 def _render_output_text(text: str) -> str:
-    if not text:
-        return _THINKING_MESSAGE
     if len(text) <= _DISCORD_MESSAGE_LIMIT:
         return text
     suffix = "\n...[truncated]"
@@ -225,57 +262,24 @@ def _is_server_request(message: ServerMessage) -> TypeGuard[ServerRequest]:
     return hasattr(message, "id")
 
 
-async def _safe_edit_message(
-    message: discord.Message | discord.PartialMessage, content: str
-) -> None:
-    try:
-        await message.edit(content=_render_output_text(content))
-    except discord.HTTPException:
-        logger.exception("Failed to edit Discord message: id=%s", message.id)
-
-
-async def _get_output_message(
+async def _get_discord_thread(
     *,
     client: MentionPrinterClient,
-    turn_output: TurnOutputState,
-) -> discord.Message | discord.PartialMessage | None:
-    cached_message = discord.utils.get(
-        client.cached_messages,
-        id=turn_output.discord_message_id,
-    )
-    if cached_message is not None:
-        return cached_message
-
-    channel = client.get_channel(turn_output.discord_thread_channel_id)
+    discord_thread_id: int,
+) -> discord.Thread | None:
+    channel = client.get_channel(discord_thread_id)
     if channel is None:
-        fetched_channel = await client.fetch_channel(
-            turn_output.discord_thread_channel_id
-        )
-        channel = fetched_channel
+        channel = await client.fetch_channel(discord_thread_id)
 
     if not isinstance(channel, discord.Thread):
         logger.warning(
             "Expected Discord thread channel: id=%s type=%s",
-            turn_output.discord_thread_channel_id,
+            discord_thread_id,
             type(channel).__name__,
         )
         return None
 
-    return channel.get_partial_message(turn_output.discord_message_id)
-
-
-async def _update_turn_output_message(
-    *,
-    client: MentionPrinterClient,
-    turn_output: TurnOutputState,
-) -> None:
-    message = await _get_output_message(
-        client=client,
-        turn_output=turn_output,
-    )
-    if message is None:
-        return
-    await _safe_edit_message(message, turn_output.text)
+    return channel
 
 
 async def _handle_server_request(
@@ -298,22 +302,6 @@ async def _handle_server_request(
     )
 
 
-async def _handle_agent_message_delta(
-    *,
-    client: MentionPrinterClient,
-    state_store: MemoryStateStore,
-    notification: ItemAgentMessageDeltaNotification,
-) -> None:
-    turn_output = await state_store.append_turn_output_delta(
-        codex_turn_id=notification.params.turnId,
-        item_id=notification.params.itemId,
-        delta=notification.params.delta,
-    )
-    if turn_output is None:
-        return
-    await _update_turn_output_message(client=client, turn_output=turn_output)
-
-
 async def _handle_item_completed(
     *,
     client: MentionPrinterClient,
@@ -325,18 +313,27 @@ async def _handle_item_completed(
         return
 
     text = getattr(item, "text", None)
-    item_id = getattr(item, "id", None)
     if not isinstance(text, str):
         return
 
-    turn_output = await state_store.set_turn_output_text(
-        codex_turn_id=notification.params.turnId,
-        item_id=item_id if isinstance(item_id, str) else None,
-        text=text,
-    )
-    if turn_output is None:
+    if not text:
         return
-    await _update_turn_output_message(client=client, turn_output=turn_output)
+
+    turn = await state_store.get_turn(codex_turn_id=notification.params.turnId)
+    if turn is None:
+        return
+
+    discord_thread = await _get_discord_thread(
+        client=client,
+        discord_thread_id=turn.discord_thread_id,
+    )
+    if discord_thread is None:
+        return
+
+    await discord_thread.send(_render_output_text(text))
+    await state_store.mark_turn_sent_agent_message(
+        codex_turn_id=notification.params.turnId
+    )
 
 
 async def _handle_turn_completed(
@@ -345,28 +342,24 @@ async def _handle_turn_completed(
     state_store: MemoryStateStore,
     notification: TurnCompletedNotification,
 ) -> None:
-    turn_output = await state_store.get_turn_output(
-        codex_turn_id=notification.params.turn.id
-    )
-    if turn_output is None:
+    turn = await state_store.get_turn(codex_turn_id=notification.params.turn.id)
+    if turn is None:
         return
 
+    await client.stop_turn_typing(codex_turn_id=notification.params.turn.id)
+
     turn_error = notification.params.turn.error
-    if turn_error is not None and not turn_output.text:
-        turn_output = await state_store.set_turn_output_text(
-            codex_turn_id=notification.params.turn.id,
-            item_id=turn_output.agent_message_item_id,
-            text=f"Error: {turn_error.message}",
+    if turn_error is not None and not turn.has_sent_agent_message:
+        discord_thread = await _get_discord_thread(
+            client=client,
+            discord_thread_id=turn.discord_thread_id,
         )
-        if turn_output is not None:
-            await _update_turn_output_message(
-                client=client,
-                turn_output=turn_output,
+        if discord_thread is not None:
+            await discord_thread.send(
+                _render_output_text(f"Error: {turn_error.message}")
             )
 
-    await state_store.delete_turn_output(
-        codex_turn_id=notification.params.turn.id
-    )
+    await state_store.delete_turn(codex_turn_id=notification.params.turn.id)
 
 
 async def _consume_codex_server_messages(
@@ -380,13 +373,7 @@ async def _consume_codex_server_messages(
         message = await server_message_queue.get()
 
         try:
-            if isinstance(message, ItemAgentMessageDeltaNotification):
-                await _handle_agent_message_delta(
-                    client=client,
-                    state_store=state_store,
-                    notification=message,
-                )
-            elif isinstance(message, ItemCompletedNotification):
+            if isinstance(message, ItemCompletedNotification):
                 await _handle_item_completed(
                     client=client,
                     state_store=state_store,

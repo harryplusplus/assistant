@@ -76,7 +76,7 @@ class CodexAppServer:
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._server_request_response_task: asyncio.Task[None] | None = None
-        self._next_request_id = 0
+        self._next_request_id = 1
         self._pending: dict[int, asyncio.Future[object]] = {}
 
     async def start(self) -> None:
