@@ -36,7 +36,9 @@ class MessageError(Exception):
     message: str
     data: object | None = None
 
-    def __init__(self, code: int, message: str, data: object | None = None) -> None:
+    def __init__(
+        self, code: int, message: str, data: object | None = None
+    ) -> None:
         super().__init__(f"Message error: code={code}, message={message}")
         self.code = code
         self.message = message
@@ -47,6 +49,7 @@ _APP_SERVER_COMMAND: Final[tuple[str, ...]] = (
     "codex",
     "app-server",
 )
+CLIENT_REQUEST_ID_PLACEHOLDER: Final = 0
 _REQUEST_TIMEOUT_SECONDS: Final = 10.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
 
@@ -54,6 +57,7 @@ _SHUTDOWN_TIMEOUT_SECONDS: Final = 5.0
 class AppServer:
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
+        self._stdin: asyncio.StreamWriter | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._next_request_id = 0
@@ -65,14 +69,22 @@ class AppServer:
             raise RuntimeError(msg)
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *_APP_SERVER_COMMAND,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._stdout_task = asyncio.create_task(self._stdout_loop())
-            self._stderr_task = asyncio.create_task(self._stderr_loop())
+            self._process = process
+            self._stdin = process.stdin
+            stdout = process.stdout
+            stderr = process.stderr
+            if self._stdin is None or stdout is None or stderr is None:
+                msg = "Stdio pipes were not created."
+                raise RuntimeError(msg)
+
+            self._stdout_task = asyncio.create_task(self._stdout_loop(stdout))
+            self._stderr_task = asyncio.create_task(self._stderr_loop(stderr))
             await self._initialize()
             await self._initialized()
         except BaseException:
@@ -84,16 +96,20 @@ class AppServer:
             return
 
         process = self._process
+        stdin = self._stdin
         self._process = None
+        self._stdin = None
 
-        stdin = process.stdin
         if stdin is not None and not stdin.is_closing():
             stdin.close()
             with suppress(BrokenPipeError):
                 await stdin.wait_closed()
 
         try:
-            await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=_SHUTDOWN_TIMEOUT_SECONDS,
+            )
         except TimeoutError:
             logger.warning("Did not exit after stdin close; sending SIGTERM")
             process.terminate()
@@ -127,15 +143,19 @@ class AppServer:
                 result_type,
             )
 
+    async def send_notification(self, notification: ClientNotification) -> None:
+        self._check_can_send_messages()
+        await self._write(notification)
+
     async def _send_request_without_timeout(
         self, request: ClientRequest, result_type: type[ModelType]
     ) -> ModelType:
+        request.id = self._increase_request_id()
         request_id = request.id
-        if not isinstance(request_id, int):
-            msg = f"Client request ID must be int: got {request_id!r}"
-            raise TypeError(msg)
 
-        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[object] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._pending[request_id] = future
 
         try:
@@ -149,55 +169,15 @@ class AppServer:
 
         return result_type.model_validate(result)
 
-    async def send_notification(self, notification: ClientNotification) -> None:
-        self._check_can_send_messages()
-        await self._write(notification)
-
-    def _get_process(self) -> asyncio.subprocess.Process:
-        process = self._process
-        if process is None:
+    def _check_can_send_messages(self) -> None:
+        if self._process is None:
             msg = "Not running."
             raise RuntimeError(msg)
-
-        return process
-
-    def _check_can_send_messages(self) -> None:
-        self._get_process()
 
         stdout_task = self._stdout_task
         if stdout_task is None or stdout_task.done():
             msg = "Cannot send more messages."
             raise RuntimeError(msg)
-
-    def _get_stdin(self) -> asyncio.StreamWriter:
-        process = self._get_process()
-
-        stdin = process.stdin
-        if stdin is None or stdin.is_closing():
-            msg = "Stdin is not available."
-            raise RuntimeError(msg)
-
-        return stdin
-
-    def _get_stdout(self) -> asyncio.StreamReader:
-        process = self._get_process()
-
-        stdout = process.stdout
-        if stdout is None:
-            msg = "Stdout is not available."
-            raise RuntimeError(msg)
-
-        return stdout
-
-    def _get_stderr(self) -> asyncio.StreamReader:
-        process = self._get_process()
-
-        stderr = process.stderr
-        if stderr is None:
-            msg = "Stderr is not available."
-            raise RuntimeError(msg)
-
-        return stderr
 
     def _increase_request_id(self) -> int:
         request_id = self._next_request_id
@@ -205,14 +185,16 @@ class AppServer:
         return request_id
 
     async def _write(self, message: ClientRequest | ClientNotification) -> None:
-        stdin = self._get_stdin()
+        stdin = self._stdin
+        if stdin is None or stdin.is_closing():
+            msg = "Stdin is not available."
+            raise RuntimeError(msg)
+
         stdin.write((message.model_dump_json() + "\n").encode())
         await stdin.drain()
 
-    async def _stdout_loop(self) -> None:
+    async def _stdout_loop(self, stdout: asyncio.StreamReader) -> None:
         try:
-            stdout = self._get_stdout()
-
             while True:
                 line = await stdout.readline()
                 if line == b"":
@@ -240,10 +222,8 @@ class AppServer:
         finally:
             self._fail_pending(RuntimeError("Stdout closed."))
 
-    async def _stderr_loop(self) -> None:
+    async def _stderr_loop(self, stderr: asyncio.StreamReader) -> None:
         try:
-            stderr = self._get_stderr()
-
             while True:
                 line = await stderr.readline()
                 if line == b"":
@@ -298,7 +278,10 @@ class AppServer:
 
         future = self._pending.pop(request_id, None)
         if future is None:
-            logger.warning("Received response for unknown request ID: %s", message.id)
+            logger.warning(
+                "Received response for unknown request ID: %s",
+                message.id,
+            )
             return None
 
         if future.done():
@@ -348,10 +331,9 @@ class AppServer:
                     await task
 
     async def _initialize(self) -> None:
-        request_id = self._increase_request_id()
         result = await self.send_request(
             InitializeRequest(
-                id=request_id,
+                id=CLIENT_REQUEST_ID_PLACEHOLDER,
                 method="initialize",
                 params=InitializeParams(
                     clientInfo=ClientInfo(
@@ -367,4 +349,6 @@ class AppServer:
         logger.info("Initialized: user_agent=%s", result.userAgent)
 
     async def _initialized(self) -> None:
-        await self.send_notification(InitializedNotification(method="initialized"))
+        await self.send_notification(
+            InitializedNotification(method="initialized")
+        )
