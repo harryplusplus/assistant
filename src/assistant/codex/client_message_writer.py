@@ -1,6 +1,6 @@
 import asyncio
 
-from assistant.codex._app_server import ServerRequestResponse
+from assistant.codex._old_app_server import ServerRequestResponse
 from assistant.codex.schemas.codex_app_server_protocol_schemas import (
     ClientNotification,
     ClientRequest,

@@ -11,7 +11,7 @@ import discord
 from dotenv import load_dotenv
 from typing_extensions import override
 
-from .codex.app_server import (
+from .codex._old_app_server import (
     CodexAppServer,
     ServerMessage,
     ServerRequestResponse,
@@ -316,7 +316,7 @@ def _build_thread_name(prompt: str) -> str:
         return "assistant"
     if len(title) <= _THREAD_TITLE_LIMIT:
         return title
-    return f"{title[:_THREAD_TITLE_LIMIT - 3]}..."
+    return f"{title[: _THREAD_TITLE_LIMIT - 3]}..."
 
 
 def _build_codex_prompt(
@@ -331,9 +331,7 @@ def _build_codex_prompt(
         for user in message.mentions
         if user.id not in {message.author.id, bot_user_id}
     ]
-    mention_targets = (
-        "\n".join(mention_lines) if mention_lines else "- none"
-    )
+    mention_targets = "\n".join(mention_lines) if mention_lines else "- none"
     guild_mention_target_lines = [
         _format_discord_mention_target(mention_target)
         for mention_target in guild_mention_targets
