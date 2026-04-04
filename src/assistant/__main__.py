@@ -4,6 +4,7 @@ import signal
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import TypeGuard
 
 import discord
@@ -28,11 +29,12 @@ from .codex.schemas.codex_app_server_protocol_schemas import (
 )
 from .config import Config
 from .logger import configure_logger
-from .state_store import MemoryStateStore
+from .state_store import DiscordMentionTarget, MemoryStateStore
 
 logger = logging.getLogger(__name__)
 _DISCORD_MESSAGE_LIMIT = 2000
 _THREAD_TITLE_LIMIT = 60
+_GUILD_MEMBER_CHUNK_TIMEOUT_SECONDS = 5.0
 
 
 def _mentions_bot_user(*, message: discord.Message, bot_user_id: int) -> bool:
@@ -57,6 +59,7 @@ class MentionPrinterClient(discord.Client):
     def __init__(self, *, context: Context) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.members = True
         intents.guild_messages = True
         intents.message_content = True
         super().__init__(intents=intents)
@@ -67,6 +70,11 @@ class MentionPrinterClient(discord.Client):
     async def on_ready(self) -> None:
         if self.user is None:
             return
+        logger.info(
+            "Refreshing guild mention targets: guild_id=%s",
+            self.context.config.discord_guild_id,
+        )
+        await self._refresh_guild_mention_targets()
         logger.info("Logged in as %s (%s)", self.user, self.user.id)
         logger.info(
             "Watching guild id=%s", self.context.config.discord_guild_id
@@ -120,6 +128,14 @@ class MentionPrinterClient(discord.Client):
                 message=message,
                 prompt=prompt,
             )
+            codex_prompt = _build_codex_prompt(
+                message=message,
+                prompt=prompt,
+                bot_user_id=self.user.id,
+                guild_mention_targets=(
+                    await self.context.state_store.get_discord_mention_targets()
+                ),
+            )
             codex_thread_id = await self._ensure_codex_thread_id(
                 discord_thread_id=discord_thread.id
             )
@@ -129,7 +145,7 @@ class MentionPrinterClient(discord.Client):
                     V2TurnStartParams(
                         approvalPolicy="never",
                         threadId=codex_thread_id,
-                        input=[TextUserInput(type="text", text=prompt)],
+                        input=[TextUserInput(type="text", text=codex_prompt)],
                     )
                 )
             await self.context.state_store.create_turn(
@@ -188,6 +204,58 @@ class MentionPrinterClient(discord.Client):
             codex_thread_id,
         )
         return codex_thread_id
+
+    async def _refresh_guild_mention_targets(self) -> None:
+        guild = self.get_guild(self.context.config.discord_guild_id)
+        if guild is None:
+            logger.warning(
+                "Target guild is not available in cache: guild_id=%s",
+                self.context.config.discord_guild_id,
+            )
+            return
+
+        try:
+            members = await asyncio.wait_for(
+                guild.chunk(cache=True),
+                timeout=_GUILD_MEMBER_CHUNK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out while chunking guild members: guild_id=%s. "
+                "Using cached guild.members snapshot instead. "
+                "Check that Server Members Intent is enabled in the "
+                "Discord Developer Portal.",
+                guild.id,
+            )
+            members = guild.members
+        mention_targets = tuple(
+            sorted(
+                (
+                    DiscordMentionTarget(
+                        discord_user_id=member.id,
+                        display_name=member.display_name,
+                        global_name=member.global_name,
+                        user_name=member.name,
+                        is_bot=member.bot,
+                    )
+                    for member in members
+                ),
+                key=lambda member: (
+                    member.display_name.casefold(),
+                    member.user_name.casefold(),
+                    member.discord_user_id,
+                ),
+            )
+        )
+        await self.context.state_store.replace_discord_mention_targets(
+            mention_targets=mention_targets
+        )
+        logger.info(
+            "Loaded guild mention targets: guild_id=%s count=%s targets=%s",
+            guild.id,
+            len(mention_targets),
+            _format_discord_mention_targets_log(mention_targets),
+        )
 
     def start_turn_typing(
         self, *, codex_turn_id: str, discord_thread: discord.Thread
@@ -249,6 +317,111 @@ def _build_thread_name(prompt: str) -> str:
     if len(title) <= _THREAD_TITLE_LIMIT:
         return title
     return f"{title[:_THREAD_TITLE_LIMIT - 3]}..."
+
+
+def _build_codex_prompt(
+    *,
+    message: discord.Message,
+    prompt: str,
+    bot_user_id: int,
+    guild_mention_targets: tuple[DiscordMentionTarget, ...],
+) -> str:
+    mention_lines = [
+        f"- {user.display_name}: <@{user.id}>"
+        for user in message.mentions
+        if user.id not in {message.author.id, bot_user_id}
+    ]
+    mention_targets = (
+        "\n".join(mention_lines) if mention_lines else "- none"
+    )
+    guild_mention_target_lines = [
+        _format_discord_mention_target(mention_target)
+        for mention_target in guild_mention_targets
+    ]
+    guild_mention_targets_text = (
+        "\n".join(guild_mention_target_lines)
+        if guild_mention_target_lines
+        else "- none"
+    )
+
+    return (
+        "디스코드 문맥:\n"
+        f"- 현재 발화자의 Discord user id는 {message.author.id} 입니다.\n"
+        f"- 현재 발화자는 {'봇' if message.author.bot else '사람'} 입니다.\n"
+        "- 현재 발화자가 사람이라면 자동으로 멘션하지 마세요.\n"
+        "- 현재 발화자가 다른 봇이라면, 그 봇에게 직접 답하는 경우 답변의 "
+        "첫머리에서 <@발화자ID>로 멘션하세요.\n"
+        "- 이 메시지는 이미 너에게 전달된 메시지입니다. 호출용으로 붙은 "
+        "너 자신의 멘션은 무시하고, 답변에 다시 자기 자신을 멘션하지 마세요.\n"
+        "- 사용자가 특정 길드 멤버에게 말을 걸라고 하면, 아래 "
+        "'길드 멘션 대상 목록'의 실제 Discord 멘션 <@ID>를 사용하세요.\n"
+        "- 사용자가 특정 대상에게 말을 걸라고 했다면, 답변의 첫머리에서 그 "
+        "대상을 실제 Discord 멘션 <@ID>로 부르세요.\n"
+        "- 이름 문자열이나 @이름 형태만 쓰지 말고 실제 Discord 멘션 "
+        "<@ID>를 사용하세요.\n"
+        "- 실제 Discord 멘션은 사용자가 명시적으로 누군가를 지목했을 때만 "
+        "사용하세요.\n"
+        "- 현재 발화자를 멘션해야 할 때는 "
+        f"<@{message.author.id}> 를 사용하세요.\n"
+        "- display name 문자열만으로는 실제 멘션이 되지 않습니다.\n"
+        "예시:\n"
+        "- 현재 발화자가 다른 봇이고, 그 봇에게 직접 응답하는 상황이면 "
+        "'<@발화자ID> ...'처럼 답변을 시작하세요.\n"
+        "- 사용자가 'Hermes한테 인사해봐'라고 했고, 길드 멘션 대상 목록에 "
+        "'Hermes: <@123>'가 있다면, 답변은 'Hermes 안녕!'이 아니라 "
+        "'<@123> 안녕!'처럼 실제 멘션을 사용하세요.\n"
+        "- 사용자가 'Hermes랑 이야기좀해봐'라고 했고, 길드 멘션 대상 목록에 "
+        "'Hermes: <@123>'가 있다면, 답변은 '<@123> 안녕하세요. 잠깐 "
+        "이야기 가능하시면 답해주세요.'처럼 대상 멘션으로 시작하세요.\n"
+        "- 사용자가 'B에게 현재 상태 물어봐'라고 했고, 길드 멘션 대상 "
+        "목록에 'B: <@456>'가 있다면, '<@456> 현재 상태 어때?'처럼 "
+        "답하세요.\n"
+        "현재 메시지에서 이미 멘션된 대상:\n"
+        f"{mention_targets}\n"
+        "길드 멘션 대상 목록:\n"
+        f"{guild_mention_targets_text}\n"
+        "\n"
+        "사용자 메시지:\n"
+        f"{prompt}"
+    )
+
+
+def _get_discord_mention_target_aliases(
+    mention_target: DiscordMentionTarget,
+) -> tuple[str, ...]:
+    aliases = [mention_target.display_name]
+    if mention_target.global_name is not None:
+        aliases.append(mention_target.global_name)
+    if mention_target.user_name not in aliases:
+        aliases.append(mention_target.user_name)
+    return tuple(aliases)
+
+
+def _format_discord_mention_target(
+    mention_target: DiscordMentionTarget,
+) -> str:
+    aliases = list(_get_discord_mention_target_aliases(mention_target))
+    primary_name = aliases.pop(0)
+    alias_suffix = ""
+    if aliases:
+        alias_suffix = f" (aliases: {', '.join(aliases)})"
+    bot_suffix = " (bot)" if mention_target.is_bot else ""
+    return (
+        f"- {primary_name}{alias_suffix}{bot_suffix}: "
+        f"<@{mention_target.discord_user_id}>"
+    )
+
+
+def _format_discord_mention_targets_log(
+    mention_targets: tuple[DiscordMentionTarget, ...],
+) -> str:
+    if not mention_targets:
+        return "-"
+
+    return ", ".join(
+        f"{mention_target.display_name}(<@{mention_target.discord_user_id}>)"
+        for mention_target in mention_targets
+    )
 
 
 def _render_output_text(text: str) -> str:
@@ -546,7 +719,7 @@ async def _async_main(config: Config) -> None:
 
 
 def main() -> None:
-    load_dotenv()
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
     config = Config.from_env()
     configure_logger(config)
     asyncio.run(_async_main(config))

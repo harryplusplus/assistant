@@ -1,4 +1,14 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordMentionTarget:
+    discord_user_id: int
+    display_name: str
+    global_name: str | None
+    user_name: str
+    is_bot: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +23,7 @@ class MemoryStateStore:
     def __init__(self) -> None:
         self._codex_thread_ids_by_discord_thread_id: dict[int, str] = {}
         self._turns_by_codex_turn_id: dict[str, TurnState] = {}
+        self._discord_mention_targets: tuple[DiscordMentionTarget, ...] = ()
 
     async def get_codex_thread_id(
         self, *, discord_thread_id: int
@@ -59,3 +70,13 @@ class MemoryStateStore:
 
     async def delete_turn(self, *, codex_turn_id: str) -> None:
         self._turns_by_codex_turn_id.pop(codex_turn_id, None)
+
+    async def replace_discord_mention_targets(
+        self, *, mention_targets: Sequence[DiscordMentionTarget]
+    ) -> None:
+        self._discord_mention_targets = tuple(mention_targets)
+
+    async def get_discord_mention_targets(
+        self,
+    ) -> tuple[DiscordMentionTarget, ...]:
+        return self._discord_mention_targets
