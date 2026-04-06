@@ -92,6 +92,7 @@ async def codex_exec(  # noqa: PLR0915
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=1024 * 1024,
     )
 
     stdin_error: Exception | None = None
