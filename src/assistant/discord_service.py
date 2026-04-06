@@ -9,6 +9,9 @@ from assistant.discord_thread_links_repo import DiscordThreadLinksRepo
 logger = logging.getLogger(__name__)
 
 
+DISCORD_MESSAGE_MAX_LENGTH = 2000
+
+
 class DiscordService:
     def __init__(
         self, discord_thread_links_repo: DiscordThreadLinksRepo
@@ -66,7 +69,13 @@ class DiscordService:
                         item = json_data["item"]
                         item_type = item["type"]
                         if item_type == "agent_message":
-                            await thread.send(item["text"] or "No response")
+                            text = item["text"] or "No response"
+                            for i in range(
+                                0, len(text), DISCORD_MESSAGE_MAX_LENGTH
+                            ):
+                                await thread.send(
+                                    text[i : i + DISCORD_MESSAGE_MAX_LENGTH]
+                                )
 
         except Exception as e:
             logger.exception("Error while responding to message")
