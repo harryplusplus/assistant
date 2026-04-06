@@ -6,6 +6,8 @@ from enum import StrEnum
 
 _GRACEFUL_WAIT_TIMEOUT = 60
 _FORCE_WAIT_TIMEOUT = 5
+_READ_CHUNK_SIZE = 64 * 1024
+_MAX_PENDING_LINE_BYTES = 8 * 1024 * 1024
 
 
 class Kind(StrEnum):
@@ -22,13 +24,33 @@ class Event:
 async def _read(
     reader: asyncio.StreamReader, kind: Kind, queue: asyncio.Queue[Event]
 ) -> None:
+    buffer = bytearray()
+
     try:
         while True:
-            line = await reader.readline()
-            if line == b"":
+            chunk = await reader.read(_READ_CHUNK_SIZE)
+            if chunk == b"":
+                if buffer:
+                    queue.put_nowait(Event(kind=kind, data=bytes(buffer)))
                 break
 
-            queue.put_nowait(Event(kind=kind, data=line))
+            buffer.extend(chunk)
+
+            while True:
+                newline_index = buffer.find(b"\n")
+                if newline_index < 0:
+                    break
+
+                end = newline_index + 1
+                queue.put_nowait(Event(kind=kind, data=bytes(buffer[:end])))
+                del buffer[:end]
+
+            if len(buffer) > _MAX_PENDING_LINE_BYTES:
+                msg = (
+                    f"{kind} produced a line longer than "
+                    f"{_MAX_PENDING_LINE_BYTES} bytes without newline"
+                )
+                raise RuntimeError(msg)
     finally:
         await queue.put(Event(kind=kind, data=None))
 
@@ -92,7 +114,6 @@ async def codex_exec(  # noqa: PLR0915
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        limit=1024 * 1024,
     )
 
     stdin_error: Exception | None = None
