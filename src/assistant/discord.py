@@ -7,7 +7,7 @@ import discord
 from dishka import Provider, Scope
 
 from assistant.config import Config
-from assistant.dishka_shim import provide
+from assistant.dishka_typing import provide
 
 logger = logging.getLogger(__name__)
 
