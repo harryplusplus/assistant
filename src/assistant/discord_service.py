@@ -55,8 +55,7 @@ class DiscordService:
                     item = json_data["item"]
                     item_type = item["type"]
                     if item_type == "agent_message":
-                        text = item["text"]
-                        response += text
+                        response += item["text"]
 
             await thread.send(response or "No response")
         except Exception as e:
