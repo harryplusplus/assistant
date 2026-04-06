@@ -4,6 +4,9 @@ from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+_GRACEFUL_WAIT_TIMEOUT = 60
+_FORCE_WAIT_TIMEOUT = 5
+
 
 class Kind(StrEnum):
     STDOUT = "stdout"
@@ -16,7 +19,7 @@ class Event:
     data: bytes | None
 
 
-async def _reader_run(
+async def _read(
     reader: asyncio.StreamReader, kind: Kind, queue: asyncio.Queue[Event]
 ) -> None:
     try:
@@ -30,14 +33,9 @@ async def _reader_run(
         await queue.put(Event(kind=kind, data=None))
 
 
-_GRACEFUL_WAIT_TIMEOUT = 60
-_FORCE_WAIT_TIMEOUT = 5
-
-
 async def _cleanup(
     process: asyncio.subprocess.Process,
-    stdout_task: asyncio.Task[None] | None,
-    stderr_task: asyncio.Task[None] | None,
+    read_tasks: list[asyncio.Task[None]],
     *,
     read_done: bool,
 ) -> None:
@@ -59,13 +57,10 @@ async def _cleanup(
                     process.kill()
                 await process.wait()
 
-    tasks = [t for t in (stdout_task, stderr_task) if t is not None]
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [r for r in results if isinstance(r, BaseException)]
-        if len(errors) == 1:
-            raise errors[0]
-        if len(errors) > 1:
+    if read_tasks:
+        results = await asyncio.gather(*read_tasks, return_exceptions=True)
+        errors = [x for x in results if isinstance(x, BaseException)]
+        if errors:
             msg = f"Failed to read from stdout and stderr: {len(errors)} errors"
             raise BaseExceptionGroup(msg, errors)
 
@@ -85,6 +80,7 @@ async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  
         "--color",
         "never",
         "--json",
+        "-",
         "resume",
         session_id,
         stdin=asyncio.subprocess.PIPE,
@@ -93,8 +89,7 @@ async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  
     )
 
     stdin_error: Exception | None = None
-    stdout_task: asyncio.Task[None] | None = None
-    stderr_task: asyncio.Task[None] | None = None
+    read_tasks: list[asyncio.Task[None]] = []
     read_done = False
     try:
         stdin = process.stdin
@@ -105,11 +100,11 @@ async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  
             raise RuntimeError(msg)
 
         queue: asyncio.Queue[Event] = asyncio.Queue()
-        stdout_task = asyncio.create_task(
-            _reader_run(stdout, Kind.STDOUT, queue)
+        read_tasks.append(
+            asyncio.create_task(_read(stdout, Kind.STDOUT, queue))
         )
-        stderr_task = asyncio.create_task(
-            _reader_run(stderr, Kind.STDERR, queue)
+        read_tasks.append(
+            asyncio.create_task(_read(stderr, Kind.STDERR, queue))
         )
 
         try:
@@ -138,7 +133,7 @@ async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  
         read_done = True
     finally:
         cleanup_task = asyncio.create_task(
-            _cleanup(process, stdout_task, stderr_task, read_done=read_done)
+            _cleanup(process, read_tasks, read_done=read_done)
         )
         try:
             await asyncio.shield(cleanup_task)
