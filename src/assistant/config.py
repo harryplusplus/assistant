@@ -75,5 +75,5 @@ class ConfigProvider(Provider):
     scope = Scope.APP
 
     @provide()
-    async def config(self) -> Config:
+    async def get_config(self) -> Config:
         return await asyncio.to_thread(_load_config)
