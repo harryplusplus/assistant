@@ -1,21 +1,31 @@
-# assistant
+# Assistant
 
-## Discord mention printer
+## Requirements
 
-Set these variables in `.env`:
-
-```env
-DISCORD_TOKEN=your-bot-token
-DISCORD_GUILD_ID=123456789012345678
-LOG_LEVEL=info
+Codex CLI
+```sh
+codex --version # codex-cli 0.118.0
 ```
 
-Run:
+Set the following environment variables:
 
-```bash
-uv run python -m assistant
+```dotenv
+DISCORD_TOKEN=your-token
+DISCORD_GUILD_ID=your-guild-id
 ```
 
-The bot will print only messages from `DISCORD_GUILD_ID` that mention the running bot user.
+## Running
 
-`LOG_LEVEL` defaults to `info`. Set it to `debug` to see debug logs.
+For local development:
+
+```sh
+ASSISTANT_HOME=$(pwd) uv run -m assistant
+```
+
+For personal deployment:
+
+`ASSISTANT_HOME` defaults to `$HOME/.assistant`.
+
+```sh
+uv run -m assistant
+```
