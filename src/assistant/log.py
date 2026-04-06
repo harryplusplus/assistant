@@ -1,9 +1,12 @@
 import logging
-import sys
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 from typing import override
 
-from assistant.config import LogLevel
+from dishka import Provider, Scope
+
+from assistant.config import Config
+from assistant.dishka_typing import provide
 
 
 class Iso8601Formatter(logging.Formatter):
@@ -23,21 +26,35 @@ class Iso8601Formatter(logging.Formatter):
         )
 
 
-def init_log() -> None:
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        Iso8601Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"),
-    )
-    root_logger.addHandler(handler)
+class LogInitToken:
+    pass
 
 
-def set_log_level(log_level: LogLevel) -> None:
-    level = logging.getLevelNamesMapping().get(log_level.upper())
-    if level is None:
-        msg = f"Invalid log level: {log_level}"
-        raise ValueError(msg)
+class LogProvider(Provider):
+    scope = Scope.APP
 
-    logging.getLogger().setLevel(level)
+    @provide()
+    def init_log(self, config: Config) -> LogInitToken:
+        root_logger = logging.getLogger()
+        root_logger.handlers.clear()
+
+        handler = RotatingFileHandler(
+            config.logs_dir / "assistant.log",
+            maxBytes=10_000_000,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            Iso8601Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+            ),
+        )
+        root_logger.addHandler(handler)
+
+        level = logging.getLevelNamesMapping().get(config.log_level.upper())
+        if level is None:
+            msg = f"Invalid log level: {config.log_level}"
+            raise ValueError(msg)
+
+        root_logger.setLevel(level)
+        return LogInitToken()

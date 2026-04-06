@@ -57,19 +57,27 @@ class Config:
     discord_guild_id: int
     log_level: LogLevel
     db_path: Path
+    logs_dir: Path
 
 
 def _load_config() -> Config:
     assistant_home = _get_assistant_home()
     _ensure_assistant_home(assistant_home)
+
     dotenv = _load_dotenv(assistant_home)
     config_toml = _load_config_toml(assistant_home)
+
+    logs_dir = assistant_home / "logs"
+    if not logs_dir.exists():
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
     return Config(
         assistant_home=assistant_home,
         discord_token=dotenv.DISCORD_TOKEN,
         discord_guild_id=dotenv.DISCORD_GUILD_ID,
         log_level=config_toml.log_level,
         db_path=assistant_home / "state.db",
+        logs_dir=logs_dir,
     )
 
 

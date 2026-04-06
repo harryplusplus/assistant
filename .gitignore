@@ -212,3 +212,5 @@ __marimo__/
 
 # Assistant
 /state.db*
+/logs/
+/config.toml

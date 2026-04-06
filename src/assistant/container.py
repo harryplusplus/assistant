@@ -6,6 +6,7 @@ from assistant.discord import DiscordProvider
 from assistant.discord_service import DiscordService
 from assistant.discord_thread_links_repo import DiscordThreadLinksRepo
 from assistant.dishka_typing import provide
+from assistant.log import LogProvider
 
 
 class AppProvider(Provider):
@@ -21,4 +22,5 @@ def create_container() -> AsyncContainer:
         DiscordProvider(),
         DbProvider(),
         AppProvider(),
+        LogProvider(),
     )

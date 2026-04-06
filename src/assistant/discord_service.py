@@ -24,9 +24,10 @@ class DiscordService:
         try:
             await message.add_reaction("👀")
             async with thread.typing():
+                discord_thread_id = thread.id
                 codex_session_id = (
                     await self._discord_thread_links_repo.get_codex_session_id(
-                        discord_thread_id=thread.id
+                        discord_thread_id=discord_thread_id
                     )
                 )
 
@@ -35,21 +36,31 @@ class DiscordService:
                     message.clean_content, session_id=codex_session_id
                 ):
                     if event.kind == "stderr":
-                        logger.error("Error from codex_exec: %s", event.data)
+                        logger.error(
+                            "discord_thread_id=%s, error=%s",
+                            discord_thread_id,
+                            (event.data or b"")
+                            .rstrip()
+                            .decode(errors="replace"),
+                        )
                         continue
 
                     if event.data is None:
                         continue
 
                     json_str = event.data.rstrip().decode(errors="replace")
-                    logger.debug("Received event from codex_exec: %s", json_str)
+                    logger.info(
+                        "discord_thread_id=%s, event=%s",
+                        discord_thread_id,
+                        json_str,
+                    )
 
                     json_data = json.loads(json_str)
                     type_ = json_data["type"]
                     if type_ == "thread.started":
                         if codex_session_id is None:
                             await self._discord_thread_links_repo.create(
-                                discord_thread_id=thread.id,
+                                discord_thread_id=discord_thread_id,
                                 codex_session_id=json_data["thread_id"],
                             )
                     elif type_ == "item.completed":
