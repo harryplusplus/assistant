@@ -56,6 +56,7 @@ class Config:
     discord_token: str
     discord_guild_id: int
     log_level: LogLevel
+    db_path: Path
 
 
 def _load_config() -> Config:
@@ -68,6 +69,7 @@ def _load_config() -> Config:
         discord_token=dotenv.DISCORD_TOKEN,
         discord_guild_id=dotenv.DISCORD_GUILD_ID,
         log_level=config_toml.log_level,
+        db_path=assistant_home / "state.db",
     )
 
 

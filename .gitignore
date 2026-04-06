@@ -207,8 +207,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Codex app server
-/.codex_schemas/
-
 # macOS
 .DS_Store
+
+# Assistant
+/state.db*

@@ -65,8 +65,10 @@ async def _cleanup(
             raise BaseExceptionGroup(msg, errors)
 
 
-async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  # noqa: PLR0915
-    process = await asyncio.create_subprocess_exec(
+async def codex_exec(  # noqa: PLR0915
+    prompt: str, *, session_id: str | None
+) -> AsyncIterable[Event]:
+    cmd = (
         "codex",
         "exec",
         "--config",
@@ -81,8 +83,12 @@ async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  
         "never",
         "--json",
         "-",
-        "resume",
-        session_id,
+    )
+    if session_id is not None:
+        cmd += ("resume", session_id)
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

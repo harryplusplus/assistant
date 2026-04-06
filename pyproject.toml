@@ -5,6 +5,7 @@ description = "My AI assistant"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiosqlite>=0.22.1",
     "discord-py>=2.7.1",
     "dishka>=1.9.1",
     "pydantic>=2.12.5",
@@ -26,7 +27,7 @@ package = true
 
 [tool.ruff]
 target-version = "py312"
-include = ["src/**/*.py", "pyproject.toml", "tests/**/*.py", "scripts/**/*.py"]
+include = ["src/**/*.py", "pyproject.toml", "tests/**/*.py"]
 line-length = 80
 
 [tool.ruff.lint]
@@ -54,7 +55,7 @@ select = ["ALL"]
 [tool.pyright]
 typeCheckingMode = "strict"
 reportImplicitOverride = true
-include = ["src/**/*.py", "tests/**/*.py", "scripts/**/*.py"]
+include = ["src/**/*.py", "tests/**/*.py"]
 executionEnvironments = [{ root = "tests", reportPrivateUsage = false }]
 
 [tool.pytest.ini_options]
@@ -62,4 +63,4 @@ addopts = "--import-mode=importlib --cov --cov-report=term-missing"
 
 [tool.coverage.run]
 source_pkgs = ["assistant"]
-omit = ["src/*/__main__.py", "src/assistant/codex/schemas/**/*.py"]
+omit = ["src/*/__main__.py"]
