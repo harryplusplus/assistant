@@ -2,21 +2,26 @@ import asyncio
 from typing import Protocol
 
 
-class CloseHandler(Protocol):
+class Handler(Protocol):
     async def __call__(self) -> None: ...
 
 
 class Closer:
-    def __init__(self, handler: CloseHandler) -> None:
+    def __init__(self, handler: Handler) -> None:
         self._handler = handler
         self._task: asyncio.Task[None] | None = None
 
     async def __call__(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._handler())
+        task = self._task
+        if task is None:
+            task = asyncio.create_task(self._close())
+            self._task = task
 
+        await asyncio.shield(task)
+
+    async def _close(self) -> None:
         try:
-            await asyncio.shield(self._task)
-        except Exception:
+            await self._handler()
+        except (asyncio.CancelledError, Exception):
             self._task = None
             raise

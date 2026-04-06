@@ -1,19 +1,23 @@
 import asyncio
 
-from assistant.codex._old_app_server import ServerRequestResponse
 from assistant.codex.schemas.codex_app_server_protocol_schemas import (
     ClientNotification,
     ClientRequest,
+    JsonrpcError,
+    JsonrpcResponse,
 )
 
 
-class ClientMessageWriter:
+class StdinWriter:
     def __init__(self, stdin: asyncio.StreamWriter) -> None:
         self._stdin = stdin
 
     async def __call__(
         self,
-        message: ClientRequest | ClientNotification | ServerRequestResponse,
+        message: ClientRequest
+        | ClientNotification
+        | JsonrpcResponse
+        | JsonrpcError,
     ) -> None:
         stdin = self._stdin
         if stdin.is_closing():

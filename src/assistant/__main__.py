@@ -1,34 +1,23 @@
 import asyncio
 import logging
-import signal
 from contextlib import suppress
-from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import TypeGuard
 
 import discord
 from dotenv import load_dotenv
-from typing_extensions import override
 
-from .codex._old_app_server import (
-    CodexAppServer,
-    ServerMessage,
-    ServerRequestResponse,
-)
-from .codex.client import CodexClient
+from assistant import codex, event
+from assistant.shutdown_signal import ShutdownSignal
+
 from .codex.schemas.codex_app_server_protocol_schemas import (
     ItemCompletedNotification,
-    JsonrpcError,
-    JsonrpcErrorError,
-    ServerRequest,
     TextUserInput,
     TurnCompletedNotification,
     V2ThreadStartParams,
     V2TurnStartParams,
 )
 from .config import Config
-from .logger import configure_logger
+from .logging_ import setup_logging
 from .state_store import DiscordMentionTarget, MemoryStateStore
 
 logger = logging.getLogger(__name__)
@@ -48,38 +37,19 @@ def _preview_text(text: str, *, limit: int = 30) -> str:
     return f"{preview[:limit]}..."
 
 
-@dataclass(frozen=True, slots=True)
-class Context:
-    config: Config
-    codex_client: CodexClient
-    state_store: MemoryStateStore
-
-
-class MentionPrinterClient(discord.Client):
-    def __init__(self, *, context: Context) -> None:
+class Discord(discord.Client):
+    def __init__(self, event_emitter: event.Emitter) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = True
         intents.guild_messages = True
         intents.message_content = True
         super().__init__(intents=intents)
-        self.context = context
-        self.ready_event = asyncio.Event()
-        self._turn_typing_tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def on_ready(self) -> None:
-        if self.user is None:
-            return
-        logger.info(
-            "Refreshing guild mention targets: guild_id=%s",
-            self.context.config.discord_guild_id,
-        )
-        await self._refresh_guild_mention_targets()
-        logger.info("Logged in as %s (%s)", self.user, self.user.id)
-        logger.info(
-            "Watching guild id=%s", self.context.config.discord_guild_id
-        )
-        self.ready_event.set()
+        self._event_emitter = event_emitter
+
+    def on_ready(self) -> None:
+        self._event_emitter.emit(event.DiscordReady())
 
     async def on_message(self, message: discord.Message) -> None:
         logger.debug(
@@ -290,17 +260,6 @@ class MentionPrinterClient(discord.Client):
                 discord_thread.id,
             )
 
-    @override
-    async def close(self) -> None:
-        typing_tasks = list(self._turn_typing_tasks.values())
-        self._turn_typing_tasks.clear()
-        for task in typing_tasks:
-            task.cancel()
-        for task in typing_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
-        await super().close()
-
 
 def _strip_bot_mention(*, content: str, bot_user_id: int) -> str:
     stripped = content.replace(f"<@{bot_user_id}>", "").replace(
@@ -429,13 +388,9 @@ def _render_output_text(text: str) -> str:
     return f"{text[: _DISCORD_MESSAGE_LIMIT - len(suffix)]}{suffix}"
 
 
-def _is_server_request(message: ServerMessage) -> TypeGuard[ServerRequest]:
-    return hasattr(message, "id")
-
-
 async def _get_discord_thread(
     *,
-    client: MentionPrinterClient,
+    client: Discord,
     discord_thread_id: int,
 ) -> discord.Thread | None:
     channel = client.get_channel(discord_thread_id)
@@ -453,29 +408,9 @@ async def _get_discord_thread(
     return channel
 
 
-async def _handle_server_request(
-    *,
-    message: ServerMessage,
-    server_request_response_queue: asyncio.Queue[ServerRequestResponse],
-) -> None:
-    if not _is_server_request(message):
-        return
-
-    logger.warning("Unsupported Codex server request: %s", message.method)
-    server_request_response_queue.put_nowait(
-        JsonrpcError(
-            id=message.id,
-            error=JsonrpcErrorError(
-                code=-32000,
-                message=f"Unsupported server request: {message.method}",
-            ),
-        )
-    )
-
-
 async def _handle_item_completed(
     *,
-    client: MentionPrinterClient,
+    client: Discord,
     state_store: MemoryStateStore,
     notification: ItemCompletedNotification,
 ) -> None:
@@ -509,7 +444,7 @@ async def _handle_item_completed(
 
 async def _handle_turn_completed(
     *,
-    client: MentionPrinterClient,
+    client: Discord,
     state_store: MemoryStateStore,
     notification: TurnCompletedNotification,
 ) -> None:
@@ -535,7 +470,7 @@ async def _handle_turn_completed(
 
 async def _consume_codex_server_messages(
     *,
-    client: MentionPrinterClient,
+    client: Discord,
     state_store: MemoryStateStore,
     server_message_queue: asyncio.Queue[ServerMessage],
     server_request_response_queue: asyncio.Queue[ServerRequestResponse],
@@ -570,31 +505,9 @@ async def _consume_codex_server_messages(
             )
 
 
-def _handle_shutdown_signal(
-    stop_event: asyncio.Event, signum: signal.Signals
-) -> None:
-    if stop_event.is_set():
-        return
-    logger.info("Received shutdown signal: %s", signum.name)
-    stop_event.set()
-
-
-def _install_signal_handlers(stop_event: asyncio.Event) -> None:
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(
-                signum,
-                partial(_handle_shutdown_signal, stop_event, signum),
-            )
-        except NotImplementedError:
-            logger.warning("Signal handlers are not supported on this platform")
-            return
-
-
 async def _wait_for_discord_ready(
     *,
-    client: MentionPrinterClient,
+    client: Discord,
     discord_task: asyncio.Task[None],
     stop_event: asyncio.Event,
 ) -> bool:
@@ -644,31 +557,25 @@ async def _wait_for_shutdown(
 
 
 async def _async_main(config: Config) -> None:
-    state_store = MemoryStateStore()
-    stop_event = asyncio.Event()
-    server_message_queue: asyncio.Queue[ServerMessage] = asyncio.Queue()
-    server_request_response_queue: asyncio.Queue[ServerRequestResponse] = (
-        asyncio.Queue()
-    )
-    app_server = CodexAppServer(
-        server_message_queue=server_message_queue,
-        server_request_response_queue=server_request_response_queue,
-    )
-    codex_client = CodexClient(app_server=app_server)
-    context = Context(
-        config=config,
-        codex_client=codex_client,
-        state_store=state_store,
-    )
-    client = MentionPrinterClient(context=context)
-    codex_server_message_task: asyncio.Task[None] | None = None
-    discord_task: asyncio.Task[None] | None = None
+    shutdown_signal = ShutdownSignal()
+    shutdown_signal.install()
 
-    _install_signal_handlers(stop_event)
+    event_service = event.Service()
+    codex_app_server = codex.AppServer(event_emitter=event_service.emitter)
+    codex_client_request_registry = codex.client_request.Context()
+
+    event_service.register_handler(
+        codex.server_message.Handler(codex_client_request_registry),
+    )
 
     try:
-        await app_server.start()
-        logger.info("Internal initialization completed")
+        event_service.start()
+        await codex_app_server.start()
+        codex_client = codex.create_client(
+            app_server=codex_app_server,
+            client_request_registry=codex_client_request_registry,
+        )
+        client = Discord(context=context)
 
         codex_server_message_task = asyncio.create_task(
             _consume_codex_server_messages(
@@ -679,9 +586,6 @@ async def _async_main(config: Config) -> None:
             ),
             name="codex-server-messages",
         )
-
-        if stop_event.is_set():
-            return
 
         discord_task = asyncio.create_task(
             client.start(context.config.discord_token),
@@ -696,10 +600,8 @@ async def _async_main(config: Config) -> None:
             return
         logger.info("External initialization completed")
 
-        await _wait_for_shutdown(
-            stop_event=stop_event,
-            discord_task=discord_task,
-        )
+        await shutdown_signal.wait()
+        logger.info("Shutdown signal received, starting graceful shutdown")
     finally:
         try:
             if codex_server_message_task is not None:
@@ -713,13 +615,13 @@ async def _async_main(config: Config) -> None:
                 await discord_task
         finally:
             logger.info("Starting internal graceful shutdown")
-            await app_server.close()
+            await codex_app_server.close()
 
 
 def main() -> None:
     load_dotenv(dotenv_path=Path.cwd() / ".env")
     config = Config.from_env()
-    configure_logger(config)
+    setup_logging(config)
     asyncio.run(_async_main(config))
 
 

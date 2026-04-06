@@ -1,10 +1,7 @@
 import logging
 import sys
 from datetime import UTC, datetime
-
-from typing_extensions import override
-
-from .config import Config
+from typing import override
 
 
 def _to_logging_level(value: str) -> int:
@@ -28,7 +25,7 @@ class Iso8601Formatter(logging.Formatter):
         )
 
 
-def configure_logger(config: Config) -> None:
+def setup_logging(config: Config) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         Iso8601Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"),

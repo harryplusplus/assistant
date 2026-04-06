@@ -1,44 +1,79 @@
+import asyncio
 import os
+import tomllib
 from dataclasses import dataclass
-from typing import Self
+from pathlib import Path
+from typing import Literal
+
+from dishka import Provider, Scope
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+from assistant.dishka_shim import provide
 
 
-def _require_env(name: str) -> str:
-    value = os.getenv(name)
-    if value is None or value == "":
-        msg = f"{name} environment variable is required."
-        raise RuntimeError(msg)
-    return value
+def _get_assistant_home() -> Path:
+    assistant_home = os.getenv("ASSISTANT_HOME")
+    if assistant_home:
+        return Path(assistant_home).expanduser().resolve()
+    return Path.home() / ".assistant"
 
 
-def _parse_log_level(*, value: str, env_name: str) -> str:
-    log_level = value.lower()
-    if log_level not in {"debug", "info", "warning", "error"}:
-        msg = (
-            f"{env_name} must be one of debug, info, warning, error: "
-            f"got {value!r}."
-        )
-        raise ValueError(msg)
-    return log_level
+def _ensure_assistant_home(assistant_home: Path) -> None:
+    if not assistant_home.exists():
+        assistant_home.mkdir(parents=True, exist_ok=True)
 
 
-def _get_log_level_from_env(env_name: str) -> str:
-    return _parse_log_level(
-        value=os.getenv(env_name, "info"),
-        env_name=env_name,
+class Dotenv(BaseModel):
+    DISCORD_TOKEN: str
+    DISCORD_GUILD_ID: int
+
+
+def _load_dotenv(assistant_home: Path) -> Dotenv:
+    load_dotenv(dotenv_path=assistant_home / ".env")
+    return Dotenv.model_validate(os.environ)
+
+
+LogLevel = Literal["debug", "info", "warn", "warning", "error"]
+
+
+class ConfigToml(BaseModel):
+    log_level: LogLevel = "info"
+
+
+def _load_config_toml(assistant_home: Path) -> ConfigToml:
+    config_path = assistant_home / "config.toml"
+    if not config_path.is_file():
+        return ConfigToml()
+
+    with config_path.open("rb") as f:
+        return ConfigToml.model_validate(tomllib.load(f))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Config:
+    assistant_home: Path
+    discord_token: str
+    discord_guild_id: int
+    log_level: LogLevel
+
+
+def _load_config() -> Config:
+    assistant_home = _get_assistant_home()
+    _ensure_assistant_home(assistant_home)
+    dotenv = _load_dotenv(assistant_home)
+    config_toml = _load_config_toml(assistant_home)
+    return Config(
+        assistant_home=assistant_home,
+        discord_token=dotenv.DISCORD_TOKEN,
+        discord_guild_id=dotenv.DISCORD_GUILD_ID,
+        log_level=config_toml.log_level,
     )
 
 
-@dataclass(frozen=True, slots=True)
-class Config:
-    discord_token: str
-    discord_guild_id: int
-    log_level: str
+class ConfigProvider(Provider):
+    scope = Scope.APP
 
-    @classmethod
-    def from_env(cls) -> Self:
-        return cls(
-            discord_token=_require_env("DISCORD_TOKEN"),
-            discord_guild_id=int(_require_env("DISCORD_GUILD_ID")),
-            log_level=_get_log_level_from_env("LOG_LEVEL"),
-        )
+    @provide()
+    async def config(self) -> Config:
+        return await asyncio.to_thread(_load_config)

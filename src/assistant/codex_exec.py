@@ -1,0 +1,156 @@
+import asyncio
+import contextlib
+from collections.abc import AsyncIterable
+from dataclasses import dataclass
+from enum import StrEnum
+
+
+class Kind(StrEnum):
+    STDOUT = "stdout"
+    STDERR = "stderr"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Event:
+    kind: Kind
+    data: bytes | None
+
+
+async def _reader_run(
+    reader: asyncio.StreamReader, kind: Kind, queue: asyncio.Queue[Event]
+) -> None:
+    try:
+        while True:
+            line = await reader.readline()
+            if line == b"":
+                break
+
+            queue.put_nowait(Event(kind=kind, data=line))
+    finally:
+        await queue.put(Event(kind=kind, data=None))
+
+
+_GRACEFUL_WAIT_TIMEOUT = 60
+_FORCE_WAIT_TIMEOUT = 5
+
+
+async def _cleanup(
+    process: asyncio.subprocess.Process,
+    stdout_task: asyncio.Task[None] | None,
+    stderr_task: asyncio.Task[None] | None,
+    *,
+    read_done: bool,
+) -> None:
+    if process.returncode is None:
+        try:
+            timeout = (
+                _GRACEFUL_WAIT_TIMEOUT if read_done else _FORCE_WAIT_TIMEOUT
+            )
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            try:
+                await asyncio.wait_for(
+                    process.wait(), timeout=_FORCE_WAIT_TIMEOUT
+                )
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+
+    tasks = [t for t in (stdout_task, stderr_task) if t is not None]
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if len(errors) == 1:
+            raise errors[0]
+        if len(errors) > 1:
+            msg = f"Failed to read from stdout and stderr: {len(errors)} errors"
+            raise BaseExceptionGroup(msg, errors)
+
+
+async def codex_exec(prompt: str, *, session_id: str) -> AsyncIterable[Event]:  # noqa: PLR0915
+    process = await asyncio.create_subprocess_exec(
+        "codex",
+        "exec",
+        "--config",
+        'model_reasoning_effort="xhigh"',
+        "--config",
+        'plan_mode_reasoning_effort="xhigh"',
+        "--model",
+        "gpt-5.4",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "--color",
+        "never",
+        "--json",
+        "resume",
+        session_id,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    stdin_error: Exception | None = None
+    stdout_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[None] | None = None
+    read_done = False
+    try:
+        stdin = process.stdin
+        stdout = process.stdout
+        stderr = process.stderr
+        if stdin is None or stdout is None or stderr is None:
+            msg = "Failed to create subprocess with pipes"
+            raise RuntimeError(msg)
+
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        stdout_task = asyncio.create_task(
+            _reader_run(stdout, Kind.STDOUT, queue)
+        )
+        stderr_task = asyncio.create_task(
+            _reader_run(stderr, Kind.STDERR, queue)
+        )
+
+        try:
+            stdin.write(prompt.encode())
+            await stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            stdin_error = e
+        finally:
+            stdin.close()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await stdin.wait_closed()
+
+        stdout_running = True
+        stderr_running = True
+        while stdout_running or stderr_running:
+            event = await queue.get()
+            if event.data is None:
+                if event.kind == Kind.STDOUT:
+                    stdout_running = False
+                else:
+                    stderr_running = False
+                continue
+
+            yield event
+
+        read_done = True
+    finally:
+        cleanup_task = asyncio.create_task(
+            _cleanup(process, stdout_task, stderr_task, read_done=read_done)
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            await cleanup_task
+            raise
+
+    returncode = process.returncode
+    if returncode != 0:
+        msg = f"Codex process exited with code {returncode}"
+        raise RuntimeError(msg)
+
+    if stdin_error is not None:
+        msg = "Failed to write to Codex process stdin"
+        raise RuntimeError(msg) from stdin_error

@@ -2,7 +2,11 @@ import asyncio
 import contextlib
 import logging
 
-from assistant.closer import Closer
+from assistant import event
+from assistant.codex.app_server.consumer import JsonlConsumer
+from assistant.codex.app_server.stderr import create_stderr_consumer
+from assistant.codex.app_server.stdin import StdinWriter
+from assistant.codex.app_server.stdout import create_stdout_consumer
 
 logger = logging.getLogger(__name__)
 
@@ -10,16 +14,13 @@ logger = logging.getLogger(__name__)
 _WAIT_TIMEOUT = 5
 
 
-class AppServer:
+class Process:
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
-        self._closer = Closer(self._on_close)
 
     async def start(
-        self,
-    ) -> tuple[
-        asyncio.StreamWriter, asyncio.StreamReader, asyncio.StreamReader
-    ]:
+        self, event_emitter: event.Emitter
+    ) -> tuple[StdinWriter, JsonlConsumer, JsonlConsumer]:
         if self._process is not None:
             msg = "Already started"
             raise RuntimeError(msg)
@@ -41,19 +42,21 @@ class AppServer:
                 msg = "Failed to capture stdin, stdout, or stderr"
                 raise RuntimeError(msg)
 
-            return (
-                self._process.stdin,
-                self._process.stdout,
-                self._process.stderr,
+            stdin_writer = StdinWriter(self._process.stdin)
+            stdout_consumer = create_stdout_consumer(
+                stdout=self._process.stdout,
+                event_emitter=event_emitter,
             )
+            stderr_consumer = create_stderr_consumer(
+                stderr=self._process.stderr
+            )
+
+            return stdin_writer, stdout_consumer, stderr_consumer
         except BaseException:
             await self.close()
             raise
 
     async def close(self) -> None:
-        await self._closer()
-
-    async def _on_close(self) -> None:
         process = self._process
         if process is None:
             return
