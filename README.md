@@ -1,5 +1,7 @@
 # Assistant
 
+A personal AI assistant built with Discord and Codex.
+
 ## Requirements
 
 Codex CLI
