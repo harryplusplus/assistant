@@ -5,11 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from dishka import Provider, Scope
 from dotenv import load_dotenv
 from pydantic import BaseModel
-
-from assistant.dishka_typing import provide
 
 
 def _get_assistant_home() -> Path:
@@ -81,9 +78,5 @@ def _load_config() -> Config:
     )
 
 
-class ConfigProvider(Provider):
-    scope = Scope.APP
-
-    @provide()
-    async def get_config(self) -> Config:
-        return await asyncio.to_thread(_load_config)
+async def load_config() -> Config:
+    return await asyncio.to_thread(_load_config)
