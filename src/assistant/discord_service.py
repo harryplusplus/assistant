@@ -31,7 +31,6 @@ class DiscordService:
                     )
                 )
 
-                response = ""
                 async for event in codex_exec(
                     message.clean_content, session_id=codex_session_id
                 ):
@@ -67,9 +66,8 @@ class DiscordService:
                         item = json_data["item"]
                         item_type = item["type"]
                         if item_type == "agent_message":
-                            response += item["text"]
+                            await thread.send(item["text"] or "No response")
 
-                await thread.send(response or "No response")
         except Exception as e:
             logger.exception("Error while responding to message")
             await thread.send(
