@@ -214,3 +214,6 @@ __marimo__/
 /state.db*
 /logs/
 /config.toml
+
+# VS Code
+/.vscode/
