@@ -69,13 +69,8 @@ class DiscordService:
                         item = json_data["item"]
                         item_type = item["type"]
                         if item_type == "agent_message":
-                            text = item["text"] or "No response"
-                            for i in range(
-                                0, len(text), DISCORD_MESSAGE_MAX_LENGTH
-                            ):
-                                await thread.send(
-                                    text[i : i + DISCORD_MESSAGE_MAX_LENGTH]
-                                )
+                            text = item["text"] or "<no content>"
+                            await self._send_message(thread, text)
 
         except Exception as e:
             logger.exception("Error while responding to message")
@@ -87,3 +82,7 @@ class DiscordService:
             await message.add_reaction("✅")
         finally:
             await message.remove_reaction("👀", user)
+
+    async def _send_message(self, thread: discord.Thread, content: str) -> None:
+        for i in range(0, len(content), DISCORD_MESSAGE_MAX_LENGTH):
+            await thread.send(content[i : i + DISCORD_MESSAGE_MAX_LENGTH])
