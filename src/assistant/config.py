@@ -9,7 +9,7 @@ from dishka import Provider, Scope
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from assistant.dishka_shim import provide
+from assistant.dishka_typing import provide
 
 
 def _get_assistant_home() -> Path:
