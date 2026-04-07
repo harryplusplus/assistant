@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncIterable
 from typing import Any
 
-from assistant.codex_exec import codex_exec
+from assistant.codex import execute_codex
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class CodexExecutor:
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterable[dict[str, Any]]:
-        async for event in codex_exec(prompt, session_id=session_id):
+        async for event in execute_codex(prompt, session_id=session_id):
             if event.kind == "stderr":
                 logger.error(
                     "metadata=%s, error=%s",

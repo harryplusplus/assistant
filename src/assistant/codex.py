@@ -93,7 +93,7 @@ async def _cleanup(
             raise BaseExceptionGroup(msg, errors)
 
 
-async def codex_exec(  # noqa: PLR0915
+async def execute_codex(  # noqa: PLR0915
     prompt: str, *, session_id: str | None
 ) -> AsyncIterable[Event]:
     cmd = (

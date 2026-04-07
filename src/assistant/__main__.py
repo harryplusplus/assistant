@@ -8,7 +8,7 @@ from assistant.db import init_engine, init_sessionmaker
 from assistant.discord import init_discord
 from assistant.discord_codex_service import DiscordCodexService
 from assistant.discord_thread_links_service import DiscordThreadLinksService
-from assistant.logging import init_logging
+from assistant.logging_ import init_logging
 from assistant.stop_signal import init_stop_signals
 
 logger = logging.getLogger(__name__)
