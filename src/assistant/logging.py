@@ -23,7 +23,7 @@ class Iso8601Formatter(logging.Formatter):
         )
 
 
-def configure_logging(config: Config) -> None:
+def init_logging(config: Config) -> None:
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
 

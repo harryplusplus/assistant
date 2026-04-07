@@ -78,5 +78,5 @@ def _load_config() -> Config:
     )
 
 
-async def load_config() -> Config:
+async def init_config() -> Config:
     return await asyncio.to_thread(_load_config)

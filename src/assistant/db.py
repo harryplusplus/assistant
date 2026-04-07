@@ -1,6 +1,6 @@
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from dishka import Provider, Scope
 from sqlalchemy import event
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import (
@@ -11,17 +11,15 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from assistant.config import Config
-from assistant.dishka_typing import provide
 from assistant.models import Base
 
 AsyncSessionmaker = async_sessionmaker[AsyncSession]
 
 
-class DbProvider(Provider):
-    scope = Scope.APP
-
-    @provide()
-    async def get_engine(self, config: Config) -> AsyncIterable[AsyncEngine]:
+@asynccontextmanager
+async def init_engine(config: Config) -> AsyncIterator[AsyncEngine]:
+    engine: AsyncEngine | None = None
+    try:
         engine = create_async_engine(f"sqlite+aiosqlite:///{config.db_path}")
         event.listen(engine.sync_engine, "connect", _set_sqlite_pragmas)
 
@@ -30,13 +28,14 @@ class DbProvider(Provider):
             await conn.run_sync(Base.metadata.create_all)
 
         yield engine
+    finally:
+        if engine is not None:
+            event.remove(engine.sync_engine, "connect", _set_sqlite_pragmas)
+            await engine.dispose()
 
-        event.remove(engine.sync_engine, "connect", _set_sqlite_pragmas)
-        await engine.dispose()
 
-    @provide()
-    def get_sessionmaker(self, engine: AsyncEngine) -> AsyncSessionmaker:
-        return async_sessionmaker(engine, expire_on_commit=False)
+def init_sessionmaker(engine: AsyncEngine) -> AsyncSessionmaker:
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 def _set_sqlite_pragmas(dbapi_connection: DBAPIConnection, _: object) -> None:

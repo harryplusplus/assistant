@@ -1,33 +1,39 @@
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 
-from assistant.config import load_config
-from assistant.container import create_container
-from assistant.discord import Discord
-from assistant.log import configure_logging
-from assistant.stop_signal import install_stop_signal_handlers
+from assistant.codex_executor import CodexExecutor
+from assistant.config import init_config
+from assistant.db import init_engine, init_sessionmaker
+from assistant.discord import init_discord
+from assistant.discord_codex_service import DiscordCodexService
+from assistant.discord_thread_links_service import DiscordThreadLinksService
+from assistant.logging import init_logging
+from assistant.stop_signal import init_stop_signals
 
 logger = logging.getLogger(__name__)
 
 
-async def _run() -> None:
-    stop_event = asyncio.Event()
-    install_stop_signal_handlers(stop_event)
-
-    config = await load_config()
-    configure_logging(config)
-
-    async with create_container(config) as container:
-        await container.get(Discord)
+async def main() -> None:
+    async with AsyncExitStack() as stack:
+        stop_event = stack.enter_context(init_stop_signals())
+        config = await init_config()
+        init_logging(config)
+        engine = await stack.enter_async_context(init_engine(config))
+        sessionmaker = init_sessionmaker(engine)
+        discord_thread_links_service = DiscordThreadLinksService(sessionmaker)
+        codex_executor = CodexExecutor()
+        discord_codex_service = DiscordCodexService(
+            discord_thread_links_service, codex_executor
+        )
+        await stack.enter_async_context(
+            init_discord(config, discord_codex_service)
+        )
         logger.info("Started.")
         await stop_event.wait()
 
     logger.info("Stopped.")
 
 
-def main() -> None:
-    asyncio.run(_run())
-
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
