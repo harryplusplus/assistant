@@ -7,7 +7,7 @@ import discord
 from dishka import Provider, Scope
 
 from assistant.config import Config
-from assistant.discord_service import DiscordService
+from assistant.discord_codex_service import DiscordCodexService
 from assistant.dishka_typing import provide
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ class Discord(discord.Client):
         self,
         *,
         config: Config,
-        discord_service: DiscordService,
+        discord_service: DiscordCodexService,
     ) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
@@ -63,7 +63,7 @@ class DiscordProvider(Provider):
 
     @provide()
     async def get_discord(
-        self, config: Config, discord_service: DiscordService
+        self, config: Config, discord_service: DiscordCodexService
     ) -> AsyncIterable[Discord]:
         discord = Discord(config=config, discord_service=discord_service)
         connect_task: asyncio.Task[None] | None = None

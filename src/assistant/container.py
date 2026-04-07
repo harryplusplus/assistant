@@ -6,11 +6,12 @@ from dishka import (
     make_async_container,
 )
 
+from assistant.codex_executor import CodexExecutor
 from assistant.config import Config
 from assistant.db import DbProvider
 from assistant.discord import DiscordProvider
-from assistant.discord_service import DiscordService
-from assistant.discord_thread_links_repo import DiscordThreadLinksRepo
+from assistant.discord_codex_service import DiscordCodexService
+from assistant.discord_thread_links_service import DiscordThreadLinksService
 from assistant.dishka_typing import provide
 
 
@@ -18,8 +19,9 @@ class AppProvider(Provider):
     scope = Scope.APP
 
     config = from_context(Config)
-    discord_thread_links_repo = provide(DiscordThreadLinksRepo)
-    discord_service = provide(DiscordService)
+    discord_thread_links_service = provide(DiscordThreadLinksService)
+    discord_service = provide(DiscordCodexService)
+    codex_executor = provide(CodexExecutor)
 
 
 def create_container(config: Config) -> AsyncContainer:

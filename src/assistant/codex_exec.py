@@ -18,11 +18,17 @@ class Kind(StrEnum):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Event:
     kind: Kind
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RawEvent:
+    kind: Kind
     data: bytes | None
 
 
 async def _read(
-    reader: asyncio.StreamReader, kind: Kind, queue: asyncio.Queue[Event]
+    reader: asyncio.StreamReader, kind: Kind, queue: asyncio.Queue[RawEvent]
 ) -> None:
     buffer = bytearray()
 
@@ -31,7 +37,7 @@ async def _read(
             chunk = await reader.read(_READ_CHUNK_SIZE)
             if chunk == b"":
                 if buffer:
-                    queue.put_nowait(Event(kind=kind, data=bytes(buffer)))
+                    queue.put_nowait(RawEvent(kind=kind, data=bytes(buffer)))
                 break
 
             buffer.extend(chunk)
@@ -42,7 +48,7 @@ async def _read(
                     break
 
                 end = newline_index + 1
-                queue.put_nowait(Event(kind=kind, data=bytes(buffer[:end])))
+                queue.put_nowait(RawEvent(kind=kind, data=bytes(buffer[:end])))
                 del buffer[:end]
 
             if len(buffer) > _MAX_PENDING_LINE_BYTES:
@@ -52,7 +58,7 @@ async def _read(
                 )
                 raise RuntimeError(msg)
     finally:
-        await queue.put(Event(kind=kind, data=None))
+        await queue.put(RawEvent(kind=kind, data=None))
 
 
 async def _cleanup(
@@ -127,7 +133,7 @@ async def codex_exec(  # noqa: PLR0915
             msg = "Failed to create subprocess with pipes"
             raise RuntimeError(msg)
 
-        queue: asyncio.Queue[Event] = asyncio.Queue()
+        queue: asyncio.Queue[RawEvent] = asyncio.Queue()
         read_tasks.append(
             asyncio.create_task(_read(stdout, Kind.STDOUT, queue))
         )
@@ -156,7 +162,7 @@ async def codex_exec(  # noqa: PLR0915
                     stderr_running = False
                 continue
 
-            yield event
+            yield Event(kind=event.kind, data=event.data)
 
         read_done = True
     finally:
