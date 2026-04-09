@@ -2,8 +2,8 @@ import logging
 
 import discord
 
-from assistant.codex_executor import CodexExecutor
 from assistant.discord_thread_links_service import DiscordThreadLinksService
+from assistant.parse_command_event import CommandExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ class DiscordCodexService:
     def __init__(
         self,
         discord_thread_links_service: DiscordThreadLinksService,
-        codex_executor: CodexExecutor,
+        codex_executor: CommandExecutor,
     ) -> None:
         self._discord_thread_links_service = discord_thread_links_service
         self._codex_executor = codex_executor
